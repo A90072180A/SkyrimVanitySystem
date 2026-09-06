@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           $env:SVS_BUILD_VERSION = '1.4.10'
-          $env:SVS_BUILD_VERSION_STRING = '1.4.10-build13-fix'
+          $env:SVS_BUILD_VERSION_STRING = '1.4.10-build13-backbuffer-fix'
           xmake f -y --builddir=build/runtime/flat --skyrim_se=y --skyrim_ae=y --skyrim_vr=n -m releasedbg
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -49,6 +49,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SkyrimVanitySystem-Build13-Render-Fix
+          name: SkyrimVanitySystem-Build13-Backbuffer-Fix
           path: artifact
           if-no-files-found: error
