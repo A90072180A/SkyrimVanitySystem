@@ -6,6 +6,7 @@
 #include "ui/MenuHost.h"
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 
@@ -13,6 +14,86 @@ namespace {
 std::atomic_bool g_windowShutdownObserved{false};
 std::mutex g_wndProcMapMutex;
 std::unordered_map<ATOM, WNDPROC> g_originalWndProcsByAtom;
+
+std::atomic_bool g_menuFrameworkBridgeRegistered{false};
+std::atomic_bool g_menuFrameworkCallbackSeen{false};
+std::int64_t g_menuFrameworkEventId{-1};
+
+constexpr int kMenuFrameworkBeforeRender = 3;
+constexpr int kMenuFrameworkAfterRender = 4;
+using MenuFrameworkEventCallback = void(__stdcall *)(int);
+using RegisterMenuFrameworkEvent =
+    std::int64_t (*)(MenuFrameworkEventCallback, float);
+
+void __stdcall OnMenuFrameworkEvent(const int a_eventType) {
+  if (g_windowShutdownObserved.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  if (!g_menuFrameworkCallbackSeen.exchange(true, std::memory_order_relaxed)) {
+    logger::info(
+        "SVS Build13 fix: SKSE Menu Framework render callback is active");
+  }
+
+  if (a_eventType == kMenuFrameworkBeforeRender) {
+    // Build 13 can replace/redirect Skyrim's old present path. Process the
+    // queued SVS hotkey/input from the Menu Framework render lifecycle instead
+    // so opening the menu no longer depends on our legacy present hook.
+    sosr::InputManager::GetSingleton()->ProcessInputEvents();
+    return;
+  }
+
+  if (a_eventType != kMenuFrameworkAfterRender) {
+    return;
+  }
+
+  auto *menu = sosr::Menu::GetSingleton();
+  if (!menu->IsEnabled()) {
+    return;
+  }
+
+  // Build 13 explicitly supports SKSE Menu Framework's UI render path. Draw
+  // SVS while that path is active and keep the render target selected by the
+  // framework/upscaler instead of forcing the swapchain backbuffer.
+  menu->Draw();
+}
+
+bool TryRegisterMenuFrameworkBridge() {
+  if (g_menuFrameworkBridgeRegistered.load(std::memory_order_relaxed)) {
+    return true;
+  }
+
+  const auto module = GetModuleHandleW(L"SKSEMenuFramework.dll");
+  if (module == nullptr) {
+    logger::warn(
+        "SVS Build13 fix: SKSEMenuFramework.dll not loaded; using legacy "
+        "present fallback");
+    return false;
+  }
+
+  const auto registerEvent = reinterpret_cast<RegisterMenuFrameworkEvent>(
+      GetProcAddress(module, "RegisterEventPriority"));
+  if (registerEvent == nullptr) {
+    logger::warn(
+        "SVS Build13 fix: SKSE Menu Framework does not export "
+        "RegisterEventPriority; using legacy present fallback");
+    return false;
+  }
+
+  g_menuFrameworkEventId = registerEvent(&OnMenuFrameworkEvent, 1000.0f);
+  if (g_menuFrameworkEventId < 0) {
+    logger::warn(
+        "SVS Build13 fix: failed to register SKSE Menu Framework event "
+        "callback; using legacy present fallback");
+    return false;
+  }
+
+  g_menuFrameworkBridgeRegistered.store(true, std::memory_order_relaxed);
+  logger::info(
+      "SVS Build13 fix: registered SKSE Menu Framework render bridge id={}",
+      g_menuFrameworkEventId);
+  return true;
+}
 
 auto GetOriginalWndProc(HWND a_hwnd) -> WNDPROC {
   const auto atom =
@@ -157,6 +238,7 @@ struct D3DInitHook {
 
     Menu::GetSingleton()->Init(swapChain, device, context);
     MenuHost::RegisterMenu();
+    TryRegisterMenuFrameworkBridge();
   }
 
   static inline REL::Relocation<decltype(thunk)> func;
@@ -168,8 +250,13 @@ struct PresentHook {
     if (g_windowShutdownObserved.load(std::memory_order_relaxed)) {
       return;
     }
-    InputManager::GetSingleton()->ProcessInputEvents();
-    Menu::GetSingleton()->Draw();
+
+    // On Build 13 we use SKSE Menu Framework's supported UI render lifecycle.
+    // Keep the old path only as a fallback for setups without the framework.
+    if (!g_menuFrameworkBridgeRegistered.load(std::memory_order_relaxed)) {
+      InputManager::GetSingleton()->ProcessInputEvents();
+      Menu::GetSingleton()->Draw();
+    }
   }
 
   static inline REL::Relocation<decltype(thunk)> func;
