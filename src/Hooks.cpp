@@ -169,6 +169,7 @@ struct PresentHook {
       return;
     }
     InputManager::GetSingleton()->ProcessInputEvents();
+    Menu::GetSingleton()->Draw();
   }
 
   static inline REL::Relocation<decltype(thunk)> func;
