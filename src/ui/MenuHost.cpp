@@ -166,7 +166,6 @@ void MenuHost::PostDisplay() {
   if (hooks::IsWindowShutdownObserved()) {
     return;
   }
-  Menu::GetSingleton()->Draw();
   ForceCursor();
 }
 
