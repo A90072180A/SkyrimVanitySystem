@@ -434,6 +434,73 @@ void Menu::Draw() {
   UpdateVisibilityAnimation(ImGui::GetIO().DeltaTime);
 
   ImGui::Render();
+
+  auto *renderer = RE::BSGraphics::Renderer::GetSingleton();
+  if (renderer == nullptr || renderer->GetRuntimeData().renderWindows == nullptr) {
+    logger::warn("SVS Build13 fix: renderer or render window unavailable");
+    return;
+  }
+
+  auto *swapChain = reinterpret_cast<IDXGISwapChain *>(
+      renderer->GetRuntimeData().renderWindows->swapChain);
+  if (swapChain == nullptr || device_ == nullptr || context_ == nullptr) {
+    logger::warn("SVS Build13 fix: swapchain/device/context unavailable");
+    return;
+  }
+
+  ID3D11Texture2D *backBuffer = nullptr;
+  const auto getBufferResult = swapChain->GetBuffer(
+      0, __uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&backBuffer));
+  if (FAILED(getBufferResult) || backBuffer == nullptr) {
+    logger::warn("SVS Build13 fix: GetBuffer failed HRESULT=0x{:08X}",
+                 static_cast<std::uint32_t>(getBufferResult));
+    return;
+  }
+
+  ID3D11RenderTargetView *backBufferRtv = nullptr;
+  const auto createRtvResult =
+      device_->CreateRenderTargetView(backBuffer, nullptr, &backBufferRtv);
+
+  D3D11_TEXTURE2D_DESC backBufferDesc{};
+  backBuffer->GetDesc(&backBufferDesc);
+  backBuffer->Release();
+  backBuffer = nullptr;
+
+  if (FAILED(createRtvResult) || backBufferRtv == nullptr) {
+    logger::warn("SVS Build13 fix: CreateRenderTargetView failed HRESULT=0x{:08X}",
+                 static_cast<std::uint32_t>(createRtvResult));
+    return;
+  }
+
+  ID3D11RenderTargetView *previousRtv = nullptr;
+  ID3D11DepthStencilView *previousDsv = nullptr;
+  context_->OMGetRenderTargets(1, &previousRtv, &previousDsv);
+  context_->OMSetRenderTargets(1, &backBufferRtv, nullptr);
+
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+  context_->OMSetRenderTargets(1, &previousRtv, previousDsv);
+
+  if (previousRtv != nullptr) {
+    previousRtv->Release();
+  }
+  if (previousDsv != nullptr) {
+    previousDsv->Release();
+  }
+  backBufferRtv->Release();
+
+  static bool loggedSuccessfulRender = false;
+  if (!loggedSuccessfulRender) {
+    DXGI_SWAP_CHAIN_DESC swapChainDesc{};
+    swapChain->GetDesc(&swapChainDesc);
+    logger::info(
+        "SVS Build13 fix: rendered to swapchain backbuffer {}x{} format={} "
+        "swapchainBuffer={}x{} currentRTV={}",
+        backBufferDesc.Width, backBufferDesc.Height,
+        static_cast<std::uint32_t>(backBufferDesc.Format),
+        swapChainDesc.BufferDesc.Width, swapChainDesc.BufferDesc.Height,
+        static_cast<void *>(previousRtv));
+    loggedSuccessfulRender = true;
+  }
 }
 } // namespace sosr
