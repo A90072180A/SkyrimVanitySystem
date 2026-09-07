@@ -159,6 +159,9 @@ void InputManager::ProcessInputEvents() {
         if (!inputSinkState.wantsTextInput &&
             scanCode == inputSinkState.toggleKey && IsBoundModifierDown() &&
             toggleKeyWentDown) {
+          logger::info(
+              "SVS Build13 fix: toggle hotkey detected scanCode=0x{:X} enabled={}",
+              scanCode, inputSinkState.enabled);
           ui::ToggleInputSinkVisibility();
           io.ClearInputKeys();
           break;
