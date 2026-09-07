@@ -36,10 +36,6 @@ void __stdcall OnMenuFrameworkEvent(const int a_eventType) {
   }
 
   if (a_eventType == kMenuFrameworkBeforeRender) {
-    // Build 13 can replace/redirect Skyrim's old present path. Process the
-    // queued SVS hotkey/input from the Menu Framework render lifecycle instead
-    // so opening the menu no longer depends on our legacy present hook.
-    sosr::InputManager::GetSingleton()->ProcessInputEvents();
     return;
   }
 
@@ -153,7 +149,14 @@ static inline REL::Relocation<uintptr_t> g_registerClass{
 void hk_PollInputDevices(RE::BSTEventSource<RE::InputEvent *> *a_dispatcher,
                          RE::InputEvent **a_events) {
   if (a_events) {
+    // RE::InputEvent objects are owned by Skyrim and are only guaranteed to be
+    // valid during the input-dispatch window.  Build 13 changes UI/render
+    // timing enough that deferring these raw pointers to a later render callback
+    // can miss the hotkey (or observe stale events).  Consume the copied pointer
+    // list immediately while the events are still valid; rendering itself still
+    // happens through SKSE Menu Framework's Build-13-compatible UI lifecycle.
     sosr::InputManager::GetSingleton()->AddEventToQueue(a_events);
+    sosr::InputManager::GetSingleton()->ProcessInputEvents();
     FilterBlockedInputEvents(a_events);
   }
 
@@ -254,7 +257,6 @@ struct PresentHook {
     // On Build 13 we use SKSE Menu Framework's supported UI render lifecycle.
     // Keep the old path only as a fallback for setups without the framework.
     if (!g_menuFrameworkBridgeRegistered.load(std::memory_order_relaxed)) {
-      InputManager::GetSingleton()->ProcessInputEvents();
       Menu::GetSingleton()->Draw();
     }
   }
