@@ -3,7 +3,7 @@ set_xmakever("3.0.0")
 
 includes("lib/commonlibsse-ng")
 
-local build_version = os.getenv("SVS_BUILD_VERSION") or "1.4.9"
+local build_version = os.getenv("SVS_BUILD_VERSION") or "1.4.10"
 local build_version_string = os.getenv("SVS_BUILD_VERSION_STRING") or build_version
 local major, minor, patch = build_version:match("^(%d+)%.(%d+)%.(%d+)$")
 if not major then
@@ -40,7 +40,7 @@ target("SkyrimVanitySystem")
     add_defines("SVS_VERSION_MAJOR=" .. major)
     add_defines("SVS_VERSION_MINOR=" .. minor)
     add_defines("SVS_VERSION_PATCH=" .. patch)
-    add_defines('SVS_VERSION_STRING="' .. build_version_string .. '"')
+    add_defines('SVS_VERSION_STRING=\"' .. build_version_string .. '\"')
 
     add_files("src/**.cpp")
     add_files(
