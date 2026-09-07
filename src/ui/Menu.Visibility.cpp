@@ -131,7 +131,10 @@ void Menu::OnMenuShow() {
   }
 
   auto &io = ImGui::GetIO();
-  io.MouseDrawCursor = false;
+  // Build 13 composites SVS after Skyrim's Scaleform cursor. Draw an ImGui
+  // software cursor in the same draw data as SVS so it stays above the menu.
+  // Keep CursorMenu active for Skyrim mouse routing/position updates.
+  io.MouseDrawCursor = true;
   io.ClearInputKeys();
   io.ClearEventsQueue();
   catalogPane_.activeTransientPopup = ui::catalog::TransientPopup::None;
