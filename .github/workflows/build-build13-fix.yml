@@ -1,4 +1,4 @@
-name: Build Build13 render fix
+name: Build Build13 compatibility release
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           $env:SVS_BUILD_VERSION = '1.4.10'
-          $env:SVS_BUILD_VERSION_STRING = '1.4.10-build13-fix'
+          $env:SVS_BUILD_VERSION_STRING = '1.4.10-build13-compatible'
           xmake f -y --builddir=build/runtime/flat --skyrim_se=y --skyrim_ae=y --skyrim_vr=n -m releasedbg
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -35,19 +35,17 @@ jobs:
           xmake build -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Stage MO2 override
+      - name: Stage MO2 package
         shell: pwsh
         run: |
           $dll = 'build/runtime/flat/windows/x64/releasedbg/SkyrimVanitySystem.dll'
           if (-not (Test-Path $dll)) { throw "Missing build output: $dll" }
           New-Item -ItemType Directory -Force -Path 'artifact/SKSE/Plugins' | Out-Null
           Copy-Item $dll 'artifact/SKSE/Plugins/SkyrimVanitySystem.dll'
-          $pdb = 'build/runtime/flat/windows/x64/releasedbg/SkyrimVanitySystem.pdb'
-          if (Test-Path $pdb) { Copy-Item $pdb 'artifact/SKSE/Plugins/SkyrimVanitySystem.pdb' }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SkyrimVanitySystem-Build13-Render-Fix
+          name: SkyrimVanitySystem-1.4.10-Build13-Compatible
           path: artifact
           if-no-files-found: error
