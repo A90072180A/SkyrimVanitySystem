@@ -54,12 +54,32 @@ struct ImportPlan {
   }
 };
 
+struct ApplyResult {
+  std::size_t addedConditions{0};
+  std::size_t reusedConditions{0};
+  std::size_t renamedConditions{0};
+  std::size_t addedWorkbenchRows{0};
+  std::size_t mergedWorkbenchRows{0};
+  std::size_t finalWorkbenchRows{0};
+  std::size_t missingWorkbenchRows{0};
+  std::size_t missingOverrideItems{0};
+  std::vector<std::string> missingFormIdentifiers;
+};
+
 [[nodiscard]] bool ExportAll(Menu &a_menu, std::string_view a_path,
                              std::string_view a_name,
                              std::string &a_error);
 
 [[nodiscard]] bool BuildImportPlan(Menu &a_menu, std::string_view a_path,
                                    ImportPlan &a_plan,
+                                   std::string &a_error);
+
+// Applies a previously reviewed import plan using additive merge semantics.
+// The current condition/workbench state is snapshotted first and restored if
+// any commit step fails. The plan is rebuilt immediately before commit so a
+// stale preview cannot silently apply against changed save data.
+[[nodiscard]] bool ApplyImportPlan(Menu &a_menu, const ImportPlan &a_plan,
+                                   ApplyResult &a_result,
                                    std::string &a_error);
 } // namespace presets
 } // namespace sosr
