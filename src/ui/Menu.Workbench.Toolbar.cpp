@@ -1,5 +1,6 @@
 #include "Menu.h"
 
+#include "PresetTransferUi.h"
 #include "imgui_internal.h"
 #include "ui/Localization.h"
 #include "ui/components/EditableCombo.h"
@@ -123,6 +124,9 @@ void Menu::DrawWorkbenchToolbar() {
       localization->Get("workbench.toolbar.kit_from_overrides"));
   const std::string kitFromOverridesTooltip(
       localization->Get("workbench.toolbar.kit_from_overrides.tooltip"));
+  const std::string presetsLabel{"Presets..."};
+  const std::string presetsTooltip{
+      "Export or merge cross-save SVS condition and workbench presets."};
 
   const std::vector<WorkbenchToolbarAction> actions = {
       WorkbenchToolbarAction{
@@ -180,6 +184,14 @@ void Menu::DrawWorkbenchToolbar() {
           .tooltip =
               [kitFromOverridesTooltip]() {
                 ImGui::TextUnformatted(kitFromOverridesTooltip.data());
+              },
+      },
+      WorkbenchToolbarAction{
+          .label = presetsLabel,
+          .callback = []() { ui::preset_transfer::RequestOpen(); },
+          .tooltip =
+              [presetsTooltip]() {
+                ImGui::TextUnformatted(presetsTooltip.data());
               },
       },
   };
@@ -285,6 +297,7 @@ void Menu::DrawWorkbenchToolbar() {
     }
   }
   ImGui::Spacing();
+  ui::preset_transfer::DrawDialog(*this);
 }
 
 void Menu::DrawWorkbenchEmptyState(const char *a_tableId,
