@@ -6,6 +6,7 @@ on:
       - build13-render-fix
       - feature/preset-transfer-step1-export
       - feature/preset-transfer-step2-plan
+      - feature/preset-transfer-step3-apply
   workflow_dispatch:
 
 jobs:
