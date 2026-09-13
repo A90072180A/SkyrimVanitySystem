@@ -5,6 +5,7 @@ on:
     branches:
       - build13-render-fix
       - feature/preset-transfer-step1-export
+      - feature/preset-transfer-step2-plan
   workflow_dispatch:
 
 jobs:
