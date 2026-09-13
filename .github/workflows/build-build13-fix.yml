@@ -7,6 +7,7 @@ on:
       - feature/preset-transfer-step1-export
       - feature/preset-transfer-step2-plan
       - feature/preset-transfer-step3-apply
+      - feature/preset-transfer-step4-ui
   workflow_dispatch:
 
 jobs:
