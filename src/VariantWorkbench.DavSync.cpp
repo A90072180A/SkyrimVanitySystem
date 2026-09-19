@@ -5,9 +5,10 @@
 #include "ConditionRefreshTargets.h"
 #include "conditions/Status.h"
 #include "integrations/DynamicArmorVariantsExtendedClient.h"
+#include "integrations/VisualStateService.h"
 
-#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <unordered_set>
 
 namespace {
@@ -44,6 +45,7 @@ struct DavReplacementData {
 struct DavVariantDescriptor {
   std::string name;
   std::string json;
+  sosr::integrations::VisualVariantDefinition visualDefinition;
 };
 
 struct DavVariantPayload {
@@ -51,7 +53,40 @@ struct DavVariantPayload {
   std::string conditionSignature;
   std::shared_ptr<RE::TESCondition> condition;
   sosr::conditions::RefreshTargets refreshTargets;
+  sosr::integrations::VisualVariantDefinition visualDefinition;
 };
+
+auto BuildVisualDefinition(
+    const sosr::workbench::VariantWorkbenchRow &a_row,
+    const std::vector<const RE::TESObjectARMO *> &a_overrideArmors,
+    const std::string &a_variantId, const std::int32_t a_priority,
+    const bool a_preview) -> sosr::integrations::VisualVariantDefinition {
+  sosr::integrations::VisualVariantDefinition definition;
+  definition.variantId = a_variantId;
+  definition.sourceArmorFormID = a_row.IsSlotRow() ? 0 : a_row.equipped.formID;
+  definition.triggerSlotMask = a_row.GetSelectionConflictSlotMask();
+  definition.priority = a_priority;
+  definition.slotTriggered = a_row.IsSlotRow();
+  definition.hideSource = a_row.hideEquipped;
+  definition.preview = a_preview;
+
+  if (!definition.hideSource) {
+    for (const auto *overrideArmor : a_overrideArmors) {
+      if (!overrideArmor) {
+        continue;
+      }
+      for (const auto *overrideAddon : overrideArmor->armorAddons) {
+        if (!overrideAddon) {
+          continue;
+        }
+        definition.replacements.push_back(
+            {.armorFormID = overrideArmor->GetFormID(),
+             .armorAddonFormID = overrideAddon->GetFormID()});
+      }
+    }
+  }
+  return definition;
+}
 
 auto CollectDavReplacementData(
     const std::vector<const RE::TESObjectARMO *> &a_overrideArmors)
@@ -195,6 +230,9 @@ auto BuildDavVariantDescriptor(
     return std::nullopt;
   }
 
+  descriptor.visualDefinition = BuildVisualDefinition(
+      a_row, a_overrideArmors, descriptor.name, a_priority, false);
+
   return descriptor;
 }
 } // namespace
@@ -231,7 +269,10 @@ bool VariantWorkbench::ApplyCatalogPreview(
   }
 
   std::unordered_map<std::string, std::string> desiredPreviewVariants;
+  std::unordered_map<std::string, sosr::integrations::VisualVariantDefinition>
+      desiredPreviewVisualDefinitions;
   desiredPreviewVariants.reserve(previewOverridesByRow.size());
+  desiredPreviewVisualDefinitions.reserve(previewOverridesByRow.size());
 
   for (const auto &[rowKey, overrideArmors] : previewOverridesByRow) {
     const auto rowIt =
@@ -258,8 +299,12 @@ bool VariantWorkbench::ApplyCatalogPreview(
       continue;
     }
 
-    desiredPreviewVariants.emplace(BuildPreviewVariantName(rowKey),
-                                   variantJson);
+    const auto variantName = BuildPreviewVariantName(rowKey);
+    const auto priority = BuildDavVariantPriority(rowIndex, rows_.size());
+    desiredPreviewVariants.emplace(variantName, variantJson);
+    desiredPreviewVisualDefinitions.emplace(
+        variantName, BuildVisualDefinition(*rowIt, overrideArmors, variantName,
+                                           priority, true));
   }
 
   if (desiredPreviewVariants.empty()) {
@@ -292,6 +337,10 @@ bool VariantWorkbench::ApplyCatalogPreview(
 
   std::unordered_map<std::string, std::string> appliedPreviewVariants;
   appliedPreviewVariants.reserve(desiredPreviewVariants.size());
+  std::vector<sosr::integrations::VisualVariantDefinition>
+      appliedPreviewVisualDefinitions;
+  appliedPreviewVisualDefinitions.reserve(desiredPreviewVariants.size());
+  std::uint64_t previewOverrideSequence = 0;
   for (const auto &[variantName, variantJson] : desiredPreviewVariants) {
     if (!dav->RegisterVariantJson(variantName.c_str(), variantJson.c_str())) {
       logger::warn("Failed to register SOSR preview variant {}", variantName);
@@ -316,11 +365,20 @@ bool VariantWorkbench::ApplyCatalogPreview(
     }
 
     appliedPreviewVariants.emplace(variantName, variantJson);
+    if (const auto definitionIt =
+            desiredPreviewVisualDefinitions.find(variantName);
+        definitionIt != desiredPreviewVisualDefinitions.end()) {
+      auto definition = definitionIt->second;
+      definition.overrideSequence = ++previewOverrideSequence;
+      appliedPreviewVisualDefinitions.push_back(std::move(definition));
+    }
   }
 
   previewSelectionKey_ = a_selectionKey;
   previewActorFormID_ = a_actor->GetFormID();
   previewDavVariants_ = std::move(desiredPreviewVariants);
+  sosr::integrations::VisualStateService::Get().SetPreviewDefinitions(
+      a_actor, std::move(appliedPreviewVisualDefinitions));
   return true;
 }
 
@@ -336,6 +394,8 @@ bool VariantWorkbench::PreviewKitLayout(
   }
 
   std::unordered_map<std::string, std::string> desiredPreviewVariants;
+  std::unordered_map<std::string, sosr::integrations::VisualVariantDefinition>
+      desiredPreviewVisualDefinitions;
   const auto resolveOverrideArmorsFromItems =
       [](const std::vector<EquipmentWidgetItem> &a_overrides) {
         std::vector<const RE::TESObjectARMO *> overrideArmors;
@@ -363,14 +423,19 @@ bool VariantWorkbench::PreviewKitLayout(
     const auto &row = projectedRow.row;
     const auto overrideArmors = resolveOverrideArmorsFromItems(row.overrides);
     const auto descriptor = BuildDavVariantDescriptor(
-        row, overrideArmors, BuildDavVariantPriority(
-                                 projectedRow.priorityRowIndex, priorityCount));
+        row, overrideArmors,
+        BuildDavVariantPriority(projectedRow.priorityRowIndex, priorityCount));
     if (!descriptor.has_value()) {
       continue;
     }
 
-    desiredPreviewVariants.emplace(BuildPreviewVariantName(descriptor->name),
-                                   descriptor->json);
+    const auto variantName = BuildPreviewVariantName(descriptor->name);
+    desiredPreviewVariants.emplace(variantName, descriptor->json);
+    auto visualDefinition = descriptor->visualDefinition;
+    visualDefinition.variantId = variantName;
+    visualDefinition.preview = true;
+    desiredPreviewVisualDefinitions.emplace(variantName,
+                                            std::move(visualDefinition));
   }
 
   if (desiredPreviewVariants.empty()) {
@@ -395,6 +460,10 @@ bool VariantWorkbench::PreviewKitLayout(
 
   std::unordered_map<std::string, std::string> appliedPreviewVariants;
   appliedPreviewVariants.reserve(desiredPreviewVariants.size());
+  std::vector<sosr::integrations::VisualVariantDefinition>
+      appliedPreviewVisualDefinitions;
+  appliedPreviewVisualDefinitions.reserve(desiredPreviewVariants.size());
+  std::uint64_t previewOverrideSequence = 0;
   for (const auto &[variantName, variantJson] : desiredPreviewVariants) {
     if (!dav->RegisterVariantJson(variantName.c_str(), variantJson.c_str())) {
       logger::warn("Failed to register SOSR preview variant {}", variantName);
@@ -419,11 +488,20 @@ bool VariantWorkbench::PreviewKitLayout(
     }
 
     appliedPreviewVariants.emplace(variantName, variantJson);
+    if (const auto definitionIt =
+            desiredPreviewVisualDefinitions.find(variantName);
+        definitionIt != desiredPreviewVisualDefinitions.end()) {
+      auto definition = definitionIt->second;
+      definition.overrideSequence = ++previewOverrideSequence;
+      appliedPreviewVisualDefinitions.push_back(std::move(definition));
+    }
   }
 
   previewSelectionKey_ = a_selectionKey;
   previewActorFormID_ = a_actor->GetFormID();
   previewDavVariants_ = std::move(desiredPreviewVariants);
+  sosr::integrations::VisualStateService::Get().SetPreviewDefinitions(
+      a_actor, std::move(appliedPreviewVisualDefinitions));
   return true;
 }
 
@@ -432,6 +510,7 @@ void VariantWorkbench::ClearPreview() {
     return;
   }
 
+  const auto previewActorFormID = previewActorFormID_;
   auto *dav = GetDynamicArmorVariantsExtendedClient();
   auto *actor = previewActorFormID_ != 0
                     ? RE::TESForm::LookupByID<RE::Actor>(previewActorFormID_)
@@ -462,6 +541,10 @@ void VariantWorkbench::ClearPreview() {
   previewSelectionKey_.clear();
   previewActorFormID_ = 0;
   previewDavVariants_.clear();
+  if (previewActorFormID != 0) {
+    sosr::integrations::VisualStateService::Get().ClearPreview(
+        previewActorFormID);
+  }
 }
 
 void VariantWorkbench::SyncDynamicArmorVariantsExtended(
@@ -516,13 +599,18 @@ void VariantWorkbench::SyncDynamicArmorVariantsExtended(
       continue;
     }
 
+    auto visualDefinition = descriptor->visualDefinition;
+    visualDefinition.conditionSignature = materializedCondition->signature;
+    visualDefinition.condition = materializedCondition->condition;
+
     desiredVariants.insert_or_assign(
         descriptor->name,
         DavVariantPayload{
             .variantJson = std::move(descriptor->json),
             .conditionSignature = materializedCondition->signature,
             .condition = materializedCondition->condition,
-            .refreshTargets = materializedCondition->refreshTargets});
+            .refreshTargets = materializedCondition->refreshTargets,
+            .visualDefinition = std::move(visualDefinition)});
   }
 
   std::unordered_map<std::string, ActiveDavVariantState> syncedVariants;
@@ -582,11 +670,22 @@ void VariantWorkbench::SyncDynamicArmorVariantsExtended(
     }
   }
 
+  std::vector<sosr::integrations::VisualVariantDefinition>
+      syncedVisualDefinitions;
+  syncedVisualDefinitions.reserve(syncedVariants.size());
+  for (const auto &[variantName, payload] : desiredVariants) {
+    if (syncedVariants.contains(variantName)) {
+      syncedVisualDefinitions.push_back(payload.visualDefinition);
+    }
+  }
+
   activeDavVariants_ = std::move(syncedVariants);
 
   if (variantsChanged) {
     sosr::conditions::RefreshActors(*dav, refreshTargets);
   }
+  sosr::integrations::VisualStateService::Get().SetPersistentDefinitions(
+      std::move(syncedVisualDefinitions));
 }
 
 void VariantWorkbench::Revert() {
@@ -615,6 +714,7 @@ void VariantWorkbench::Revert() {
   rows_.clear();
   RebuildRowOrder();
   activeDavVariants_.clear();
+  sosr::integrations::VisualStateService::Get().ClearAll();
   MarkChanged();
 }
 } // namespace sosr::workbench

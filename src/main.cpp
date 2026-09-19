@@ -4,11 +4,15 @@
 #include "Plugin.h"
 #include "Serialization.h"
 #include "integrations/DynamicArmorVariantsExtendedClient.h"
+#include "integrations/VisualStateService.h"
 #include "ui/ConditionParamOptionCache.h"
 #include "ui/Menu.h"
 
 static void SKSEMessageHandler(SKSE::MessagingInterface::Message *a_message) {
   switch (a_message->type) {
+  case SKSE::MessagingInterface::kPostLoad:
+    sosr::integrations::VisualStateService::InstallMessagingListener();
+    break;
   case SKSE::MessagingInterface::kDataLoaded:
     sosr::Menu::GetSingleton()->SetGameDataLoaded(true);
     break;
