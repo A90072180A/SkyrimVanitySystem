@@ -64,12 +64,17 @@ std::string StableIdentifier(const RE::FormID a_formID)
     }
 
     const auto* file = form->GetFile(0);
-    if (!file || !file->GetFilename()) {
+    if (!file) {
+        return {};
+    }
+
+    const auto filename = file->GetFilename();
+    if (filename.empty()) {
         return {};
     }
 
     return std::format(
-        "{}|{:08X}", file->GetFilename(), form->GetLocalFormID());
+        "{}|{:08X}", filename, form->GetLocalFormID());
 }
 
 std::optional<RE::FormID> ParseRuntimeFormID(std::string_view a_text)
