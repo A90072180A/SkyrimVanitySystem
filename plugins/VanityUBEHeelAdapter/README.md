@@ -1,99 +1,97 @@
-# Vanity UBE Heel Adapter — visual-state POC
+# Vanity UBE Heel Adapter — phase 2 POC
 
-This directory contains the first proof-of-concept consumer for the
-Skyrim Vanity System visual-state API 001.
+This branch now verifies the next layer of the SVS → adapter pipeline:
+logical-item aggregation plus **manual** stocking / footwear classification.
 
-## Scope
+No mesh mutation is performed yet.
 
-This POC deliberately does **not**:
-
-- identify stockings automatically;
-- estimate heel height;
-- parse or apply BODYTRI morphs;
-- write `NoHeel` through RaceMenu;
-- modify UBE feet, shoes, stockings, or OBody state.
-
-It only verifies the SVS → consumer data path.
+## Current behavior
 
 The plugin:
 
-1. obtains `ISkyrimVanitySystemInterface001` after SKSE `kPostPostLoad`;
-2. registers one visual-state listener;
-3. queues one additional SKSE task after a visual-state notification;
-4. calls `VisitActorVisualState(player)`;
-5. logs every `VisualPiece001`.
+1. connects to Skyrim Vanity System Visual-State API 001;
+2. queries the player after SVS notifications;
+3. logs the raw `VisualPiece001` records;
+4. aggregates duplicate ARMA/source combinations into logical visual items keyed
+   by replacement ARMO;
+5. loads a small manual config;
+6. reports visible configured stockings and configured footwear;
+7. resolves the requested continuous `NoHeel` value in the log only.
 
-Logged fields include:
+It still does **not**:
 
-- variant ID and flags;
-- source ARMO / ARMA FormIDs;
-- replacement ARMO / ARMA FormIDs;
-- trigger, source, and visual slot masks;
-- variant priority;
-- current actor model path.
+- auto-detect stockings;
+- auto-estimate heel height;
+- parse BODYTRI;
+- apply `NoHeel`;
+- touch OBody, UBE feet, shoes, or actor-wide RaceMenu morph state.
 
-## Build
+## Config
 
-From the repository root, configure the normal CommonLibSSE-NG build and build
-only the adapter target:
-
-```powershell
-$env:SVS_BUILD_VERSION = '1.4.10'
-$env:SVS_BUILD_VERSION_STRING = '1.4.10-build13-compatible'
-xmake f -y --builddir=build/runtime/flat --skyrim_se=y --skyrim_ae=y --skyrim_vr=n -m releasedbg
-xmake build -y VanityUBEHeelAdapter
-```
-
-Expected output:
+Installed path:
 
 ```text
-build/runtime/flat/windows/x64/releasedbg/VanityUBEHeelAdapter.dll
+Data/SKSE/Plugins/VanityUBEHeelAdapter.json
 ```
 
-## Runtime requirements for this POC
+Current POC schema:
 
-- SKSE / Address Library appropriate for the game runtime;
-- Skyrim Vanity System built from the visual-state API branch ancestry
-  (commit `4a4dd0e9376181957ed9752bc58530c12294086c` or later);
-- Dynamic Armor Variants Extended as required by SVS.
+```json
+{
+  "stockings": [
+    "runtime:FE429D1A"
+  ],
+  "heels": {
+    "runtime:FE4AB80A": 1.0
+  }
+}
+```
 
-The adapter should load after SKSE normally; it does not require an ESP.
+The values are **runtime FormIDs** for this POC only.
 
-## Game test
+The included defaults correspond to the latest test log:
 
-Install `VanityUBEHeelAdapter.dll` under:
+- `FE429D1A` — the visual CPB stocking item;
+- `FE4AB80A` — the visual Converse footwear item;
+- Converse is configured as `NoHeel = 1.0` (flat foot).
+
+Runtime FormIDs can change with load order. The adapter therefore also logs a
+stable `Plugin.esp|localFormID` identifier for every logical item and ARMA.
+A later phase will move the config to those stable identifiers.
+
+## Expected log
+
+When both configured items are visible:
 
 ```text
-Data/SKSE/Plugins/
+[manual stocking] ARMO=FE429D1A ...
+[manual footwear] ARMO=FE4AB80A ... requestedNoHeel=1.000
+[heel plan] stockingARMO=FE429D1A footwearARMO=FE4AB80A requestedNoHeel=1.000 morphApplied=false
 ```
 
-Then exercise these SVS operations:
+For the stocking, every distinct replacement ARMA is also logged as a
+`stocking geometry candidate`. This is intentional: a logical stocking ARMO
+may contain the actual stocking mesh plus unrelated helper ARMA such as
+`FemaleHands`. Phase 3 will select the geometry that actually carries the
+`NoHeel` BODYTRI morph rather than morphing the whole ARMO.
 
-1. load a save with a normal vanity outfit;
-2. switch to another vanity outfit;
-3. change one slot override;
-4. preview an outfit / kit;
-5. cancel the preview;
-6. test a kit where a stocking is visually injected through slot 32;
-7. test a shoe replacement through slot 37.
+## Test cases
 
-Inspect the SKSE log for `VanityUBEHeelAdapter`. A successful change should
-produce an `[SVS snapshot]` line followed by one or more `[SVS piece]` lines.
+Repeat the successful phase-1 scenarios:
 
-For each visible replacement, compare the log with what the actor actually
-shows in game. In particular record whether:
+1. slot 32 injects the stocking;
+2. slot 37 injects the stocking;
+3. slot 37 displays the configured Converse;
+4. preview / cancel preview;
+5. full outfit switching.
 
-- `replacementARMO` / `replacementARMA` identify the expected item;
-- `triggerSlots` reports the source vanity trigger (for example slot 32 or 37);
-- `visualSlots` matches the replacement ARMA;
-- `model` points at the expected female mesh;
-- preview pieces carry the preview flag;
-- hidden pieces carry the hidden flag.
+For each case verify that:
 
-## Success criterion
+- the logical stocking ARMO is detected once even if raw pieces are duplicated;
+- the stocking lists all candidate geometries;
+- the Converse is detected as footwear only when visible;
+- the final `heel plan` appears only when both a configured stocking and one
+  configured footwear item are present;
+- the line always ends with `morphApplied=false`.
 
-Do not proceed to TRI morphing until the logged visual pieces reliably match
-the visible SVS/DAVE result for the test cases above.
-
-The next phase will add a hand-authored stocking + footwear mapping and still
-remain logging-only before any mesh mutation is attempted.
+Do not proceed to TRI mutation until these logs match the visible game state.

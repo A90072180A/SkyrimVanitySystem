@@ -57,9 +57,10 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.1.0")
+    set_version("0.2.0")
 
     add_deps("commonlibsse-ng")
+    add_packages("nlohmann_json")
 
     add_rules("commonlibsse-ng.plugin", {
         name = "Vanity UBE Heel Adapter",

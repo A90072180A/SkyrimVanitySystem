@@ -42,6 +42,7 @@ jobs:
           if (-not (Test-Path $dll)) { throw "Missing build output: $dll" }
           New-Item -ItemType Directory -Force -Path 'artifact/SKSE/Plugins' | Out-Null
           Copy-Item $dll 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
