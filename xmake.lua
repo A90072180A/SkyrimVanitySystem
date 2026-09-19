@@ -55,3 +55,19 @@ target("SkyrimVanitySystem")
     add_includedirs("src", "lib/imgui", "lib/imgui/backends")
     add_syslinks("d3d11", "dxgi")
     set_pcxxheader("src/pch.h")
+
+target("VanityUBEHeelAdapter")
+    set_version("0.1.0")
+
+    add_deps("commonlibsse-ng")
+
+    add_rules("commonlibsse-ng.plugin", {
+        name = "Vanity UBE Heel Adapter",
+        author = "A90072180A",
+        description = "POC consumer for Skyrim Vanity System visual-state API"
+    })
+
+    add_files("plugins/VanityUBEHeelAdapter/src/**.cpp")
+    add_headerfiles("plugins/VanityUBEHeelAdapter/src/**.h")
+    add_includedirs("src", "plugins/VanityUBEHeelAdapter/src")
+    set_pcxxheader("plugins/VanityUBEHeelAdapter/src/pch.h")
