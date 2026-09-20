@@ -17,6 +17,18 @@ struct SceneBodyTriRecord {
     std::string nodeName;
 };
 
+struct BipedPartRecord {
+    std::uint32_t slotIndex{0};
+    std::uint32_t slotNumber{0};
+    bool buffered{false};
+    RE::FormID itemFormID{0};
+    RE::FormID addonFormID{0};
+    RE::NiPointer<RE::NiAVObject> partClone;
+    std::string rootName;
+    std::vector<std::string> bodyTriPaths;
+    std::vector<std::string> geometryNames;
+};
+
 using AttachmentChangedCallback = void (*)();
 
 bool Initialize();
@@ -24,6 +36,7 @@ bool Available();
 void SetAttachmentChangedCallback(AttachmentChangedCallback a_callback);
 std::vector<AttachmentRecord> GetPlayerAttachments();
 std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes();
+std::vector<BipedPartRecord> ScanPlayerBipedParts();
 
 // Applies all of the actor's existing morphs to the selected subtree while
 // forcing the total NoHeel value to a_targetNoHeel for this single call only.

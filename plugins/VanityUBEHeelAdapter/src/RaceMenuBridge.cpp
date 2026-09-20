@@ -216,6 +216,86 @@ std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes()
     return records;
 }
 
+std::vector<BipedPartRecord> ScanPlayerBipedParts()
+{
+    std::vector<BipedPartRecord> records;
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    const auto& biped = player ? player->GetBiped(false) : nullptr;
+    if (!biped) {
+        return records;
+    }
+
+    auto appendUniqueString = [](std::vector<std::string>& a_values,
+                                 std::string a_value) {
+        if (a_value.empty()) {
+            return;
+        }
+        if (std::ranges::find(a_values, a_value) == a_values.end()) {
+            a_values.push_back(std::move(a_value));
+        }
+    };
+
+    auto collect = [&](const RE::BIPOBJECT& a_object,
+                       const std::uint32_t a_index,
+                       const bool a_buffered) {
+        if (!a_object.item && !a_object.addon && !a_object.partClone) {
+            return;
+        }
+
+        BipedPartRecord record;
+        record.slotIndex = a_index;
+        record.slotNumber = 30u + a_index;
+        record.buffered = a_buffered;
+        record.itemFormID =
+            a_object.item ? a_object.item->GetFormID() : 0;
+        record.addonFormID =
+            a_object.addon ? a_object.addon->GetFormID() : 0;
+        record.partClone = a_object.partClone;
+
+        auto* root = a_object.partClone.get();
+        if (root) {
+            record.rootName = root->name.c_str();
+
+            RE::BSVisit::TraverseScenegraphObjects(
+                root,
+                [&](RE::NiAVObject* a_node) {
+                    if (!a_node) {
+                        return RE::BSVisit::BSVisitControl::kContinue;
+                    }
+                    auto* extra =
+                        a_node->GetExtraData<RE::NiStringExtraData>("BODYTRI");
+                    if (extra && extra->value && *extra->value) {
+                        appendUniqueString(record.bodyTriPaths, extra->value);
+                    }
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+
+            RE::BSVisit::TraverseScenegraphGeometries(
+                root,
+                [&](RE::BSGeometry* a_geometry) {
+                    if (a_geometry) {
+                        appendUniqueString(
+                            record.geometryNames,
+                            std::string(a_geometry->name.c_str()));
+                    }
+                    return RE::BSVisit::BSVisitControl::kContinue;
+                });
+        }
+
+        records.push_back(std::move(record));
+    };
+
+    for (std::uint32_t index = 0;
+         index < static_cast<std::uint32_t>(RE::BIPED_OBJECTS::kTotal);
+         ++index) {
+        collect(biped->objects[index], index, false);
+        collect(biped->bufferedObjects[index], index, true);
+    }
+
+    return records;
+}
+
 bool ApplyScopedNoHeel(
     RE::Actor* a_actor,
     RE::NiAVObject* a_root,

@@ -317,6 +317,73 @@ std::optional<AttachmentMatch> FindAttachment(
         return pathMatch;
     }
 
+    // DAVE visual replacements can bypass RaceMenu's attachment observer and
+    // can also live under BipedAnim partClone trees that are not discoverable
+    // through a generic actor-root BODYTRI walk. Inspect both objects and
+    // bufferedObjects, then correlate the replacement model path to BODYTRI.
+    const auto bipedParts = racemenu::ScanPlayerBipedParts();
+    std::optional<AttachmentMatch> bipedMatch;
+    int bestBipedScore = -1;
+    for (const auto& geometry : a_stocking.geometries) {
+        const auto modelStem = NormalizeMeshStem(geometry.modelPath);
+        if (modelStem.empty()) {
+            continue;
+        }
+
+        for (const auto& part : bipedParts) {
+            if (!part.partClone) {
+                continue;
+            }
+
+            for (const auto& bodyTri : part.bodyTriPaths) {
+                if (NormalizeMeshStem(bodyTri) != modelStem) {
+                    continue;
+                }
+
+                const std::uint64_t slotBit =
+                    part.slotIndex < 64 ? (1ULL << part.slotIndex) : 0ULL;
+                bool triggerMatch = false;
+                for (const auto trigger : a_stocking.triggerSlotMasks) {
+                    if ((trigger & slotBit) != 0) {
+                        triggerMatch = true;
+                        break;
+                    }
+                }
+
+                // Prefer an active (non-buffered) partClone in the same trigger
+                // slot, but still accept a BODYTRI-exact match elsewhere.
+                const int score =
+                    (triggerMatch ? 2 : 0) + (!part.buffered ? 1 : 0);
+                if (score > bestBipedScore) {
+                    racemenu::AttachmentRecord synthetic;
+                    synthetic.armorFormID = part.itemFormID;
+                    synthetic.armorAddonFormID = part.addonFormID;
+                    synthetic.object = part.partClone;
+                    synthetic.bodyTriPath = bodyTri;
+
+                    bipedMatch = AttachmentMatch{
+                        .attachment = std::move(synthetic),
+                        .method = triggerMatch
+                            ? "biped-trigger-bodytri-stem"
+                            : "biped-bodytri-stem",
+                        .geometry = geometry};
+                    bestBipedScore = score;
+                }
+            }
+        }
+    }
+    if (bipedMatch.has_value()) {
+        logger::info(
+            "[biped target candidate] method={} matchedARMO={:08X} "
+            "matchedARMA={:08X} BODYTRI='{}' model='{}'",
+            bipedMatch->method,
+            bipedMatch->attachment.armorFormID,
+            bipedMatch->attachment.armorAddonFormID,
+            bipedMatch->attachment.bodyTriPath,
+            bipedMatch->geometry.modelPath);
+        return bipedMatch;
+    }
+
     // DAVE's render replacement path does not necessarily emit RaceMenu's
     // armor-attachment observer callback. Fall back to the actual third-person
     // scenegraph and correlate BODYTRI paths directly against the SVS visual
@@ -410,6 +477,30 @@ void LogRecentAttachments()
             "  [scene BODYTRI] node='{}' path='{}'",
             scene.nodeName,
             scene.bodyTriPath);
+    }
+
+    const auto bipedParts = racemenu::ScanPlayerBipedParts();
+    logger::info("[player biped parts] count={}", bipedParts.size());
+    for (const auto& part : bipedParts) {
+        logger::info(
+            "  [biped part] slot={} index={} buffered={} item={:08X} "
+            "addon={:08X} clone={} root='{}' BODYTRIs={} geometries={}",
+            part.slotNumber,
+            part.slotIndex,
+            part.buffered,
+            part.itemFormID,
+            part.addonFormID,
+            static_cast<bool>(part.partClone),
+            part.rootName,
+            part.bodyTriPaths.size(),
+            part.geometryNames.size());
+
+        for (const auto& bodyTri : part.bodyTriPaths) {
+            logger::info("    [biped BODYTRI] '{}'", bodyTri);
+        }
+        for (const auto& geometryName : part.geometryNames) {
+            logger::info("    [biped geometry] '{}'", geometryName);
+        }
     }
 }
 
