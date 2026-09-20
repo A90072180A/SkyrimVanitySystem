@@ -313,7 +313,46 @@ std::optional<AttachmentMatch> FindAttachment(
             }
         }
     }
-    return pathMatch;
+    if (pathMatch.has_value()) {
+        return pathMatch;
+    }
+
+    // DAVE's render replacement path does not necessarily emit RaceMenu's
+    // armor-attachment observer callback. Fall back to the actual third-person
+    // scenegraph and correlate BODYTRI paths directly against the SVS visual
+    // model path. This is the authoritative runtime visual object for morphing.
+    const auto sceneNodes = racemenu::ScanPlayerBodyTriNodes();
+    std::optional<AttachmentMatch> sceneMatch;
+    for (const auto& geometry : a_stocking.geometries) {
+        const auto modelStem = NormalizeMeshStem(geometry.modelPath);
+        if (modelStem.empty()) {
+            continue;
+        }
+
+        for (const auto& scene : sceneNodes) {
+            if (scene.bodyTriPath.empty() ||
+                NormalizeMeshStem(scene.bodyTriPath) != modelStem) {
+                continue;
+            }
+
+            AttachmentRecord synthetic;
+            synthetic.object = scene.object;
+            synthetic.bodyTriPath = scene.bodyTriPath;
+            sceneMatch = AttachmentMatch{
+                .attachment = std::move(synthetic),
+                .method = "scene-bodytri-stem",
+                .geometry = geometry};
+
+            logger::info(
+                "[scene target candidate] node='{}' BODYTRI='{}' model='{}'",
+                scene.nodeName,
+                scene.bodyTriPath,
+                geometry.modelPath);
+            return sceneMatch;
+        }
+    }
+
+    return std::nullopt;
 }
 
 void LogLogicalItems(const std::vector<LogicalVisualItem>& a_items)
@@ -362,6 +401,15 @@ void LogRecentAttachments()
             attachment.armorFormID,
             attachment.armorAddonFormID,
             attachment.bodyTriPath);
+    }
+
+    const auto sceneNodes = racemenu::ScanPlayerBodyTriNodes();
+    logger::info("[player scene BODYTRI] count={}", sceneNodes.size());
+    for (const auto& scene : sceneNodes) {
+        logger::info(
+            "  [scene BODYTRI] node='{}' path='{}'",
+            scene.nodeName,
+            scene.bodyTriPath);
     }
 }
 

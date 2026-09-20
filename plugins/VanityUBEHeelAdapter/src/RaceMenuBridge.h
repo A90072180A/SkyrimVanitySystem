@@ -11,12 +11,19 @@ struct AttachmentRecord {
     std::uint64_t sequence{0};
 };
 
+struct SceneBodyTriRecord {
+    RE::NiPointer<RE::NiAVObject> object;
+    std::string bodyTriPath;
+    std::string nodeName;
+};
+
 using AttachmentChangedCallback = void (*)();
 
 bool Initialize();
 bool Available();
 void SetAttachmentChangedCallback(AttachmentChangedCallback a_callback);
 std::vector<AttachmentRecord> GetPlayerAttachments();
+std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes();
 
 // Applies all of the actor's existing morphs to the selected subtree while
 // forcing the total NoHeel value to a_targetNoHeel for this single call only.

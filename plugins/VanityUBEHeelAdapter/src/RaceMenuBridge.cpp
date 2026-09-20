@@ -184,6 +184,38 @@ std::vector<AttachmentRecord> GetPlayerAttachments()
     return g_attachments;
 }
 
+std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes()
+{
+    std::vector<SceneBodyTriRecord> records;
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* root = player ? player->Get3D(false) : nullptr;
+    if (!root) {
+        return records;
+    }
+
+    RE::BSVisit::TraverseScenegraphObjects(
+        root,
+        [&](RE::NiAVObject* a_object) {
+            if (!a_object) {
+                return RE::BSVisit::BSVisitControl::kContinue;
+            }
+
+            auto* extra =
+                a_object->GetExtraData<RE::NiStringExtraData>("BODYTRI");
+            if (extra && extra->value && *extra->value) {
+                records.push_back(SceneBodyTriRecord{
+                    .object = RE::NiPointer<RE::NiAVObject>(a_object),
+                    .bodyTriPath = extra->value,
+                    .nodeName = a_object->name.c_str()});
+            }
+
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+
+    return records;
+}
+
 bool ApplyScopedNoHeel(
     RE::Actor* a_actor,
     RE::NiAVObject* a_root,
