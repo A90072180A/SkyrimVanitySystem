@@ -110,3 +110,35 @@ unverified estimator.
 Set `debugDiagnostics` to `true` to restore the verbose logical-item and biped
 partClone dumps used during the POC. Normal operation now keeps only target,
 profile, and morph-result messages at info level.
+
+
+## Phase 5: per-stocking morph profiles
+
+The scoped morph engine is no longer hard-wired to `NoHeel`. A stocking can
+select any RaceMenu/BodySlide morph through `stockingMorphProfiles`.
+
+The footwear profile remains a normalized posture factor:
+- `0.0` = heel/base posture
+- `1.0` = flat posture
+
+Each stocking morph profile maps that factor into the actual morph value:
+
+`target = heelValue + posture * (flatValue - heelValue)`
+
+Experimental profile for DX FetishFashion TooHotForYou Bodystocking:
+
+```json
+{
+  "modelContains": "TooHotForYou Bodystocking",
+  "morph": "HiHeelz_CBBE_to_UBE",
+  "heelValue": 0.0,
+  "flatValue": 1.0
+}
+```
+
+The TRI contains `HiHeelz_CBBE_to_UBE`, but its physical direction is not yet
+verified in game. If Converse with posture 1.0 bends the stocking the wrong way,
+swap `heelValue` and `flatValue` and retest.
+
+Items without a matching explicit morph profile continue to use the validated
+default `NoHeel` mapping `0 -> heel, 1 -> flat`.

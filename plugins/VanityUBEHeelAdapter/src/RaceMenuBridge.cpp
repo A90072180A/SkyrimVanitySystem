@@ -3,7 +3,6 @@
 
 namespace vanity_ube_heel_adapter::racemenu {
 namespace {
-constexpr auto kMorphName = "NoHeel";
 constexpr auto kMorphKey = "VanityUBEHeelAdapter";
 
 IBodyMorphInterface* g_bodyMorph{nullptr};
@@ -300,13 +299,14 @@ std::vector<BipedPartRecord> ScanPlayerBipedParts()
     return records;
 }
 
-bool ApplyScopedNoHeel(
+bool ApplyScopedMorph(
     RE::Actor* a_actor,
     RE::NiAVObject* a_root,
-    const float a_targetNoHeel,
+    const std::string_view a_morphName,
+    const float a_targetValue,
     const std::string_view a_context)
 {
-    if (!g_bodyMorph || !a_actor || !a_root) {
+    if (!g_bodyMorph || !a_actor || !a_root || a_morphName.empty()) {
         return false;
     }
 
@@ -318,39 +318,39 @@ bool ApplyScopedNoHeel(
         return false;
     }
 
+    const std::string morphName(a_morphName);
     auto* refr = reinterpret_cast<TESObjectREFR*>(a_actor);
     const bool hadOwnKey =
-        g_bodyMorph->HasBodyMorph(refr, kMorphName, kMorphKey);
+        g_bodyMorph->HasBodyMorph(refr, morphName.c_str(), kMorphKey);
     const float previousOwn =
-        g_bodyMorph->GetMorph(refr, kMorphName, kMorphKey);
+        g_bodyMorph->GetMorph(refr, morphName.c_str(), kMorphKey);
     const float totalBefore =
-        g_bodyMorph->GetBodyMorphs(refr, kMorphName);
+        g_bodyMorph->GetBodyMorphs(refr, morphName.c_str());
     const float otherKeys = totalBefore - previousOwn;
-    const float temporaryOwn = a_targetNoHeel - otherKeys;
+    const float temporaryOwn = a_targetValue - otherKeys;
 
     g_bodyMorph->SetMorph(
-        refr, kMorphName, kMorphKey, temporaryOwn);
+        refr, morphName.c_str(), kMorphKey, temporaryOwn);
 
-    // false = this is an already-attached node. RaceMenu restores the
-    // geometry's SHAPEDATA base first, then reapplies all current morphs.
     g_bodyMorph->ApplyVertexDiff(
         refr, reinterpret_cast<NiAVObject*>(a_root), false);
 
     if (hadOwnKey) {
         g_bodyMorph->SetMorph(
-            refr, kMorphName, kMorphKey, previousOwn);
+            refr, morphName.c_str(), kMorphKey, previousOwn);
     } else {
         g_bodyMorph->ClearMorph(
-            refr, kMorphName, kMorphKey);
+            refr, morphName.c_str(), kMorphKey);
     }
 
     logger::info(
-        "[local morph] applied context='{}' BODYTRI='{}' "
-        "targetNoHeel={:.3f} totalBefore={:.3f} otherKeys={:.3f} "
+        "[local morph] applied context='{}' BODYTRI='{}' morph='{}' "
+        "targetValue={:.3f} totalBefore={:.3f} otherKeys={:.3f} "
         "temporaryAdapterKey={:.3f}",
         a_context,
         bodyTri,
-        a_targetNoHeel,
+        morphName,
+        a_targetValue,
         totalBefore,
         otherKeys,
         temporaryOwn);

@@ -39,12 +39,13 @@ std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes();
 std::vector<BipedPartRecord> ScanPlayerBipedParts();
 
 // Applies all of the actor's existing morphs to the selected subtree while
-// forcing the total NoHeel value to a_targetNoHeel for this single call only.
+// forcing one named morph to a_targetValue for this single call only.
 // The temporary adapter morph key is restored immediately after the local pass.
-bool ApplyScopedNoHeel(
+bool ApplyScopedMorph(
     RE::Actor* a_actor,
     RE::NiAVObject* a_root,
-    float a_targetNoHeel,
+    std::string_view a_morphName,
+    float a_targetValue,
     std::string_view a_context);
 
 }  // namespace vanity_ube_heel_adapter::racemenu

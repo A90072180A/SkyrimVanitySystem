@@ -7,5 +7,13 @@
   ],
   "heels": {
     "[AFxII] Converse AS.esp|0000080A": 1.0
-  }
+  },
+  "stockingMorphProfiles": [
+    {
+      "modelContains": "TooHotForYou Bodystocking",
+      "morph": "HiHeelz_CBBE_to_UBE",
+      "heelValue": 0.0,
+      "flatValue": 1.0
+    }
+  ]
 }

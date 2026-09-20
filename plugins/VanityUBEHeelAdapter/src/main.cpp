@@ -14,9 +14,18 @@ using SkyrimVanitySystemAPI::VisualState001;
 constexpr auto kConfigPath =
     "Data/SKSE/Plugins/VanityUBEHeelAdapter.json"sv;
 
+struct StockingMorphProfile {
+    std::optional<RE::FormID> armorFormID;
+    std::string modelContains;
+    std::string morph{"NoHeel"};
+    float heelValue{0.0F};
+    float flatValue{1.0F};
+};
+
 struct ManualConfig {
     std::unordered_set<RE::FormID> stockings;
     std::unordered_map<RE::FormID, float> heelNoHeelByArmor;
+    std::vector<StockingMorphProfile> stockingMorphProfiles;
     bool applyMorph{true};
     bool autoDetectStockings{true};
     bool debugDiagnostics{false};
@@ -226,6 +235,56 @@ bool LoadConfig()
             }
         }
 
+        if (const auto it = root.find("stockingMorphProfiles");
+            it != root.end() && it->is_array()) {
+            for (const auto& entry : *it) {
+                if (!entry.is_object()) {
+                    continue;
+                }
+
+                StockingMorphProfile profile;
+                if (const auto armorIt = entry.find("armor");
+                    armorIt != entry.end() && armorIt->is_string()) {
+                    const auto resolved =
+                        ResolveFormIdentifier(armorIt->get<std::string>());
+                    if (resolved.has_value()) {
+                        profile.armorFormID = *resolved;
+                    } else {
+                        logger::warn(
+                            "Ignoring unresolved stocking morph profile armor '{}'",
+                            armorIt->get<std::string>());
+                    }
+                }
+                if (const auto modelIt = entry.find("modelContains");
+                    modelIt != entry.end() && modelIt->is_string()) {
+                    profile.modelContains = modelIt->get<std::string>();
+                }
+                if (const auto morphIt = entry.find("morph");
+                    morphIt != entry.end() && morphIt->is_string()) {
+                    profile.morph = morphIt->get<std::string>();
+                }
+                if (const auto heelIt = entry.find("heelValue");
+                    heelIt != entry.end() && heelIt->is_number()) {
+                    profile.heelValue = heelIt->get<float>();
+                }
+                if (const auto flatIt = entry.find("flatValue");
+                    flatIt != entry.end() && flatIt->is_number()) {
+                    profile.flatValue = flatIt->get<float>();
+                }
+
+                if (profile.morph.empty() ||
+                    (!profile.armorFormID.has_value() &&
+                     profile.modelContains.empty())) {
+                    logger::warn(
+                        "Ignoring invalid stocking morph profile; require morph "
+                        "and armor or modelContains");
+                    continue;
+                }
+
+                g_config.stockingMorphProfiles.push_back(std::move(profile));
+            }
+        }
+
         if (const auto it = root.find("applyMorph");
             it != root.end() && it->is_boolean()) {
             g_config.applyMorph = it->get<bool>();
@@ -240,10 +299,11 @@ bool LoadConfig()
         }
 
         logger::info(
-            "Loaded config: stockings={} heelProfiles={} applyMorph={} "
-            "autoDetectStockings={} debugDiagnostics={} path='{}'",
+            "Loaded config: stockings={} heelProfiles={} morphProfiles={} "
+            "applyMorph={} autoDetectStockings={} debugDiagnostics={} path='{}'",
             g_config.stockings.size(),
             g_config.heelNoHeelByArmor.size(),
+            g_config.stockingMorphProfiles.size(),
             g_config.applyMorph,
             g_config.autoDetectStockings,
             g_config.debugDiagnostics,
@@ -375,6 +435,56 @@ bool IsConfiguredOrAutoStocking(
     a_confidence = StockingConfidence(a_item);
     return a_explicit ||
            (g_config.autoDetectStockings && a_confidence >= 5);
+}
+
+struct ResolvedMorphProfile {
+    std::string morph{"NoHeel"};
+    float heelValue{0.0F};
+    float flatValue{1.0F};
+    std::string source{"default"};
+};
+
+ResolvedMorphProfile ResolveMorphProfile(
+    const LogicalVisualItem& a_stocking,
+    const GeometryCandidate& a_geometry)
+{
+    for (const auto& profile : g_config.stockingMorphProfiles) {
+        if (profile.armorFormID.has_value() &&
+            *profile.armorFormID == a_stocking.armorFormID) {
+            return ResolvedMorphProfile{
+                .morph = profile.morph,
+                .heelValue = profile.heelValue,
+                .flatValue = profile.flatValue,
+                .source = "armor"};
+        }
+    }
+
+    const auto lowerModel = LowerCopy(a_geometry.modelPath);
+    for (const auto& profile : g_config.stockingMorphProfiles) {
+        if (profile.modelContains.empty()) {
+            continue;
+        }
+        const auto token = LowerCopy(profile.modelContains);
+        if (!token.empty() &&
+            lowerModel.find(token) != std::string::npos) {
+            return ResolvedMorphProfile{
+                .morph = profile.morph,
+                .heelValue = profile.heelValue,
+                .flatValue = profile.flatValue,
+                .source = "model"};
+        }
+    }
+
+    return {};
+}
+
+float MapPostureToMorph(
+    const float a_posture,
+    const ResolvedMorphProfile& a_profile)
+{
+    const auto posture = std::clamp(a_posture, 0.0F, 1.0F);
+    return a_profile.heelValue +
+           posture * (a_profile.flatValue - a_profile.heelValue);
 }
 
 std::optional<AttachmentMatch> FindAttachment(
@@ -663,7 +773,7 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
             footwear.emplace_back(std::addressof(item), heel->second);
             logger::info(
                 "[footwear profile] ARMO={:08X} stable='{}' "
-                "requestedNoHeel={:.3f} geometries={}",
+                "requestedPosture={:.3f} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
                 heel->second,
@@ -689,18 +799,18 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 
     auto* player = RE::PlayerCharacter::GetSingleton();
     const auto* shoe = footwear.front().first;
-    const auto requestedNoHeel = footwear.front().second;
+    const auto requestedPosture = footwear.front().second;
 
     for (const auto* stocking : stockings) {
         const auto match = FindAttachment(*stocking);
         if (!match.has_value()) {
             logger::warn(
                 "[heel plan] stockingARMO={:08X} footwearARMO={:08X} "
-                "requestedNoHeel={:.3f} attachmentMatch=none "
+                "requestedPosture={:.3f} attachmentMatch=none "
                 "morphApplied=false",
                 stocking->armorFormID,
                 shoe->armorFormID,
-                requestedNoHeel);
+                requestedPosture);
             if (g_config.debugDiagnostics) {
                 LogRecentAttachments();
             }
@@ -720,12 +830,30 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
             match->attachment.bodyTriPath,
             match->geometry.modelPath);
 
+        const auto morphProfile =
+            ResolveMorphProfile(*stocking, match->geometry);
+        const auto targetMorphValue =
+            MapPostureToMorph(requestedPosture, morphProfile);
+
+        logger::info(
+            "[morph profile] stockingARMO={:08X} source={} morph='{}' "
+            "heelValue={:.3f} flatValue={:.3f} requestedPosture={:.3f} "
+            "targetMorphValue={:.3f}",
+            stocking->armorFormID,
+            morphProfile.source,
+            morphProfile.morph,
+            morphProfile.heelValue,
+            morphProfile.flatValue,
+            requestedPosture,
+            targetMorphValue);
+
         bool applied = false;
         if (g_config.applyMorph && player && match->attachment.object) {
-            applied = racemenu::ApplyScopedNoHeel(
+            applied = racemenu::ApplyScopedMorph(
                 player,
                 match->attachment.object.get(),
-                requestedNoHeel,
+                morphProfile.morph,
+                targetMorphValue,
                 std::format(
                     "stocking {:08X}/ARMA {:08X}",
                     stocking->armorFormID,
@@ -734,10 +862,13 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 
         logger::info(
             "[heel plan] stockingARMO={:08X} footwearARMO={:08X} "
-            "requestedNoHeel={:.3f} applyMorph={} morphApplied={}",
+            "requestedPosture={:.3f} morph='{}' targetMorphValue={:.3f} "
+            "applyMorph={} morphApplied={}",
             stocking->armorFormID,
             shoe->armorFormID,
-            requestedNoHeel,
+            requestedPosture,
+            morphProfile.morph,
+            targetMorphValue,
             g_config.applyMorph,
             applied);
     }
