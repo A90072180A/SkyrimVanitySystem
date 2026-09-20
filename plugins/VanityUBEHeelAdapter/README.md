@@ -142,3 +142,20 @@ swap `heelValue` and `flatValue` and retest.
 
 Items without a matching explicit morph profile continue to use the validated
 default `NoHeel` mapping `0 -> heel, 1 -> flat`.
+
+
+## Phase 5.1: profile classification and equip persistence
+
+A matching `stockingMorphProfiles` entry now also counts as explicit evidence
+that a visible SVS item is a stocking. This fixes profile-driven items such as
+TooHotForYou that do not reach the generic hosiery classifier threshold.
+
+The adapter also listens for player `TESEquipEvent` equip/unequip changes.
+Because ordinary equipment changes can rebuild player 3D and RaceMenu can then
+reapply actor-wide body morphs, the adapter performs a deferred SVS snapshot
+after two task hops and reapplies the scoped stocking morph without requiring an
+SVS rule change.
+
+The local RaceMenu interface declarations were also aligned with the public
+skee ABI by removing virtual destructors from callback-only interfaces that do
+not have them upstream.

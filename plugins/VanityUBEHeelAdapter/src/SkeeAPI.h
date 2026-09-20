@@ -42,7 +42,6 @@ struct InterfaceExchangeMessage
 class IAddonAttachmentInterface
 {
 public:
-    virtual ~IAddonAttachmentInterface() = default;
     virtual void OnAttach(
         TESObjectREFR* a_refr,
         TESObjectARMO* a_armor,
@@ -59,35 +58,30 @@ public:
     class MorphKeyVisitor
     {
     public:
-        virtual ~MorphKeyVisitor() = default;
         virtual void Visit(const char*, float) = 0;
     };
 
     class StringVisitor
     {
     public:
-        virtual ~StringVisitor() = default;
         virtual void Visit(const char*) = 0;
     };
 
     class ActorVisitor
     {
     public:
-        virtual ~ActorVisitor() = default;
         virtual void Visit(TESObjectREFR*) = 0;
     };
 
     class MorphValueVisitor
     {
     public:
-        virtual ~MorphValueVisitor() = default;
         virtual void Visit(TESObjectREFR*, const char*, const char*, float) = 0;
     };
 
     class MorphVisitor
     {
     public:
-        virtual ~MorphVisitor() = default;
         virtual void Visit(TESObjectREFR*, const char*) = 0;
     };
 

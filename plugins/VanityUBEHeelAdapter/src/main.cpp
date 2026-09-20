@@ -62,8 +62,12 @@ struct AttachmentMatch {
 ISkyrimVanitySystemInterface001* g_svs{nullptr};
 ListenerHandle g_listenerHandle{0};
 std::atomic_bool g_snapshotQueued{false};
+std::atomic_bool g_equipReapplyQueued{false};
 bool g_loggedUnavailable{false};
+bool g_equipSinkRegistered{false};
 ManualConfig g_config{};
+
+void QueueSnapshot();
 
 const char* SafeString(const char* a_value)
 {
@@ -426,14 +430,39 @@ int StockingConfidence(const LogicalVisualItem& a_item)
     return score;
 }
 
+bool MatchesStockingMorphProfile(const LogicalVisualItem& a_item)
+{
+    for (const auto& profile : g_config.stockingMorphProfiles) {
+        if (profile.armorFormID.has_value() &&
+            *profile.armorFormID == a_item.armorFormID) {
+            return true;
+        }
+
+        if (profile.modelContains.empty()) {
+            continue;
+        }
+
+        const auto token = LowerCopy(profile.modelContains);
+        for (const auto& geometry : a_item.geometries) {
+            if (LowerCopy(geometry.modelPath).find(token) !=
+                std::string::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool IsConfiguredOrAutoStocking(
     const LogicalVisualItem& a_item,
     bool& a_explicit,
+    bool& a_profileMatched,
     int& a_confidence)
 {
     a_explicit = g_config.stockings.contains(a_item.armorFormID);
+    a_profileMatched = MatchesStockingMorphProfile(a_item);
     a_confidence = StockingConfidence(a_item);
-    return a_explicit ||
+    return a_explicit || a_profileMatched ||
            (g_config.autoDetectStockings && a_confidence >= 5);
 }
 
@@ -743,16 +772,22 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 
     for (const auto& item : a_items) {
         bool explicitStocking = false;
+        bool profileStocking = false;
         int stockingConfidence = 0;
         if (IsConfiguredOrAutoStocking(
-                item, explicitStocking, stockingConfidence)) {
+                item,
+                explicitStocking,
+                profileStocking,
+                stockingConfidence)) {
             stockings.push_back(std::addressof(item));
             logger::info(
                 "[stocking detected] ARMO={:08X} stable='{}' source={} "
                 "confidence={} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
-                explicitStocking ? "config" : "auto",
+                explicitStocking
+                    ? "config"
+                    : (profileStocking ? "profile" : "auto"),
                 stockingConfidence,
                 item.geometries.size());
             if (g_config.debugDiagnostics) {
@@ -965,6 +1000,92 @@ bool TryConnect()
     return true;
 }
 
+void QueueSnapshotAfterEquipmentChange(
+    const RE::FormID a_baseObject,
+    const bool a_equipped)
+{
+    if (g_equipReapplyQueued.exchange(true)) {
+        return;
+    }
+
+    logger::info(
+        "[equip reapply] queued baseObject={:08X} equipped={}",
+        a_baseObject,
+        a_equipped);
+
+    auto finalPass = [] {
+        g_equipReapplyQueued.store(false);
+        logger::info("[equip reapply] executing deferred SVS snapshot");
+        QueueSnapshot();
+    };
+
+    auto* tasks = SKSE::GetTaskInterface();
+    if (!tasks) {
+        finalPass();
+        return;
+    }
+
+    // Equipment changes can rebuild the player's 3D and RaceMenu may reapply
+    // actor-wide morphs after the equip event. Two task hops let that rebuild
+    // settle before the adapter reapplies the scoped stocking morph.
+    tasks->AddTask([finalPass] {
+        if (auto* nextTasks = SKSE::GetTaskInterface()) {
+            nextTasks->AddTask(finalPass);
+        } else {
+            finalPass();
+        }
+    });
+}
+
+class PlayerEquipEventSink final :
+    public RE::BSTEventSink<RE::TESEquipEvent>
+{
+public:
+    static PlayerEquipEventSink* GetSingleton()
+    {
+        static PlayerEquipEventSink instance;
+        return std::addressof(instance);
+    }
+
+    RE::BSEventNotifyControl ProcessEvent(
+        const RE::TESEquipEvent* a_event,
+        RE::BSTEventSource<RE::TESEquipEvent>*) override
+    {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || a_event->actor.get() != player) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        QueueSnapshotAfterEquipmentChange(
+            a_event->baseObject,
+            a_event->equipped);
+        return RE::BSEventNotifyControl::kContinue;
+    }
+};
+
+void RegisterEquipEventSink()
+{
+    if (g_equipSinkRegistered) {
+        return;
+    }
+
+    auto* holder = RE::ScriptEventSourceHolder::GetSingleton();
+    auto* source =
+        holder ? holder->GetEventSource<RE::TESEquipEvent>() : nullptr;
+    if (!source) {
+        logger::warn("[equip reapply] TESEquipEvent source unavailable");
+        return;
+    }
+
+    source->AddEventSink(PlayerEquipEventSink::GetSingleton());
+    g_equipSinkRegistered = true;
+    logger::info("[equip reapply] registered player TESEquipEvent sink");
+}
+
 void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
 {
     if (!a_message) {
@@ -980,6 +1101,13 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
         break;
 
     case SKSE::MessagingInterface::kDataLoaded:
+        LoadConfig();
+        racemenu::Initialize();
+        RegisterEquipEventSink();
+        TryConnect();
+        QueueSnapshot();
+        break;
+
     case SKSE::MessagingInterface::kPostLoadGame:
         LoadConfig();
         racemenu::Initialize();
