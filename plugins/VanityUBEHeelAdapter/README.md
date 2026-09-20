@@ -83,3 +83,7 @@ prints the current RaceMenu attachment cache.
 
 Do not test arbitrary high heels yet; the only configured footwear target in
 this POC is the flat Converse profile.
+
+## Phase 3.2 biped diagnostics
+
+If DAVE visual replacements are absent from the ordinary player scenegraph BODYTRI walk, the adapter now inspects the third-person BipedAnim `objects` and `bufferedObjects` partClone trees for all 32 biped slots. It logs item/addon FormIDs, BODYTRI paths, node roots, and geometry names. A local NoHeel pass is attempted only when a partClone BODYTRI stem exactly matches the configured SVS stocking model; otherwise the build remains diagnostic-only for that target.
