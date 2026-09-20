@@ -221,7 +221,11 @@ std::vector<BipedPartRecord> ScanPlayerBipedParts()
     std::vector<BipedPartRecord> records;
 
     auto* player = RE::PlayerCharacter::GetSingleton();
-    const auto& biped = player ? player->GetBiped(false) : nullptr;
+    if (!player) {
+        return records;
+    }
+
+    const auto& biped = player->GetBiped(false);
     if (!biped) {
         return records;
     }
