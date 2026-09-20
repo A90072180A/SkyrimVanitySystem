@@ -18,6 +18,8 @@ struct ManualConfig {
     std::unordered_set<RE::FormID> stockings;
     std::unordered_map<RE::FormID, float> heelNoHeelByArmor;
     bool applyMorph{true};
+    bool autoDetectStockings{true};
+    bool debugDiagnostics{false};
 };
 
 struct GeometryCandidate {
@@ -103,6 +105,73 @@ std::optional<RE::FormID> ParseRuntimeFormID(std::string_view a_text)
     return static_cast<RE::FormID>(value);
 }
 
+std::optional<RE::FormID> ResolveFormIdentifier(std::string_view a_text)
+{
+    constexpr auto kRuntimePrefix = "runtime:"sv;
+    if (a_text.starts_with(kRuntimePrefix) ||
+        a_text.starts_with("0x") || a_text.starts_with("0X")) {
+        return ParseRuntimeFormID(a_text);
+    }
+
+    const auto separator = a_text.rfind('|');
+    if (separator == std::string_view::npos ||
+        separator == 0 || separator + 1 >= a_text.size()) {
+        return ParseRuntimeFormID(a_text);
+    }
+
+    const auto plugin = a_text.substr(0, separator);
+    auto localText = a_text.substr(separator + 1);
+    if (localText.starts_with("0x") || localText.starts_with("0X")) {
+        localText.remove_prefix(2);
+    }
+    if (localText.empty() || localText.size() > 8) {
+        return std::nullopt;
+    }
+
+    RE::FormID localID = 0;
+    const auto [ptr, ec] = std::from_chars(
+        localText.data(),
+        localText.data() + localText.size(),
+        localID,
+        16);
+    if (ec != std::errc{} ||
+        ptr != localText.data() + localText.size()) {
+        return std::nullopt;
+    }
+
+    auto* dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) {
+        return std::nullopt;
+    }
+
+    auto* form = dataHandler->LookupForm(localID, plugin);
+    return form ? std::optional<RE::FormID>(form->GetFormID())
+                : std::nullopt;
+}
+
+std::string LowerCopy(std::string_view a_value)
+{
+    std::string result(a_value);
+    std::ranges::transform(
+        result, result.begin(), [](const unsigned char a_char) {
+            return static_cast<char>(std::tolower(a_char));
+        });
+    return result;
+}
+
+bool ContainsAnyToken(
+    std::string_view a_text,
+    std::initializer_list<std::string_view> a_tokens)
+{
+    const auto lower = LowerCopy(a_text);
+    for (const auto token : a_tokens) {
+        if (lower.find(token) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool LoadConfig()
 {
     g_config = {};
@@ -126,10 +195,10 @@ bool LoadConfig()
                     continue;
                 }
                 const auto parsed =
-                    ParseRuntimeFormID(entry.get<std::string>());
+                    ResolveFormIdentifier(entry.get<std::string>());
                 if (!parsed.has_value()) {
                     logger::warn(
-                        "Ignoring invalid stocking runtime FormID '{}'",
+                        "Ignoring unresolved stocking identifier '{}'",
                         entry.get<std::string>());
                     continue;
                 }
@@ -143,10 +212,10 @@ bool LoadConfig()
                 if (!heel.value().is_number()) {
                     continue;
                 }
-                const auto parsed = ParseRuntimeFormID(heel.key());
+                const auto parsed = ResolveFormIdentifier(heel.key());
                 if (!parsed.has_value()) {
                     logger::warn(
-                        "Ignoring invalid heel runtime FormID '{}'",
+                        "Ignoring unresolved heel identifier '{}'",
                         heel.key());
                     continue;
                 }
@@ -161,13 +230,23 @@ bool LoadConfig()
             it != root.end() && it->is_boolean()) {
             g_config.applyMorph = it->get<bool>();
         }
+        if (const auto it = root.find("autoDetectStockings");
+            it != root.end() && it->is_boolean()) {
+            g_config.autoDetectStockings = it->get<bool>();
+        }
+        if (const auto it = root.find("debugDiagnostics");
+            it != root.end() && it->is_boolean()) {
+            g_config.debugDiagnostics = it->get<bool>();
+        }
 
         logger::info(
-            "Loaded manual config: stockings={} heelProfiles={} "
-            "applyMorph={} path='{}'",
+            "Loaded config: stockings={} heelProfiles={} applyMorph={} "
+            "autoDetectStockings={} debugDiagnostics={} path='{}'",
             g_config.stockings.size(),
             g_config.heelNoHeelByArmor.size(),
             g_config.applyMorph,
+            g_config.autoDetectStockings,
+            g_config.debugDiagnostics,
             kConfigPath);
         return true;
     } catch (const std::exception& exception) {
@@ -253,6 +332,49 @@ std::string NormalizeMeshStem(std::string_view a_path)
         value.resize(value.size() - 2);
     }
     return value;
+}
+
+int StockingConfidence(const LogicalVisualItem& a_item)
+{
+    constexpr std::uint64_t kSlot38 = 1ULL << (38 - 30);
+    constexpr std::uint64_t kSlot48 = 1ULL << (48 - 30);
+    constexpr std::uint64_t kSlot53 = 1ULL << (53 - 30);
+    constexpr std::uint64_t kHosierySlots = kSlot38 | kSlot48 | kSlot53;
+
+    int score = 0;
+    bool hasLegwearToken = false;
+    bool hasShoeToken = false;
+    for (const auto& geometry : a_item.geometries) {
+        if ((geometry.visualSlotMask & kHosierySlots) != 0) {
+            score += 3;
+        }
+        hasLegwearToken = hasLegwearToken || ContainsAnyToken(
+            geometry.modelPath,
+            {"stocking", "pantyhose", "tights", "hosiery",
+             "thighhigh", "thigh_high", "thigh high"});
+        hasShoeToken = hasShoeToken || ContainsAnyToken(
+            geometry.modelPath,
+            {"shoe", "boot", "heel", "sandal", "sneaker", "converse"});
+    }
+
+    if (hasLegwearToken) {
+        score += 4;
+    }
+    if (hasShoeToken) {
+        score -= 6;
+    }
+    return score;
+}
+
+bool IsConfiguredOrAutoStocking(
+    const LogicalVisualItem& a_item,
+    bool& a_explicit,
+    int& a_confidence)
+{
+    a_explicit = g_config.stockings.contains(a_item.armorFormID);
+    a_confidence = StockingConfidence(a_item);
+    return a_explicit ||
+           (g_config.autoDetectStockings && a_confidence >= 5);
 }
 
 std::optional<AttachmentMatch> FindAttachment(
@@ -421,6 +543,9 @@ std::optional<AttachmentMatch> FindAttachment(
 
 void LogLogicalItems(const std::vector<LogicalVisualItem>& a_items)
 {
+    if (!g_config.debugDiagnostics) {
+        return;
+    }
     logger::info("[logical items] count={}", a_items.size());
 
     for (std::size_t index = 0; index < a_items.size(); ++index) {
@@ -507,20 +632,28 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
     std::vector<std::pair<const LogicalVisualItem*, float>> footwear;
 
     for (const auto& item : a_items) {
-        if (g_config.stockings.contains(item.armorFormID)) {
+        bool explicitStocking = false;
+        int stockingConfidence = 0;
+        if (IsConfiguredOrAutoStocking(
+                item, explicitStocking, stockingConfidence)) {
             stockings.push_back(std::addressof(item));
             logger::info(
-                "[manual stocking] ARMO={:08X} stable='{}' geometries={}",
+                "[stocking detected] ARMO={:08X} stable='{}' source={} "
+                "confidence={} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
+                explicitStocking ? "config" : "auto",
+                stockingConfidence,
                 item.geometries.size());
-            for (const auto& geometry : item.geometries) {
-                logger::info(
-                    "  [stocking geometry candidate] ARMA={:08X} "
-                    "visualSlots=0x{:016X} model='{}'",
-                    geometry.armorAddonFormID,
-                    geometry.visualSlotMask,
-                    geometry.modelPath);
+            if (g_config.debugDiagnostics) {
+                for (const auto& geometry : item.geometries) {
+                    logger::info(
+                        "  [stocking geometry candidate] ARMA={:08X} "
+                        "visualSlots=0x{:016X} model='{}'",
+                        geometry.armorAddonFormID,
+                        geometry.visualSlotMask,
+                        geometry.modelPath);
+                }
             }
         }
 
@@ -529,7 +662,7 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
             heel != g_config.heelNoHeelByArmor.end()) {
             footwear.emplace_back(std::addressof(item), heel->second);
             logger::info(
-                "[manual footwear] ARMO={:08X} stable='{}' "
+                "[footwear profile] ARMO={:08X} stable='{}' "
                 "requestedNoHeel={:.3f} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
@@ -539,7 +672,7 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
     }
 
     if (stockings.empty()) {
-        logger::info("[heel plan] no configured stocking is currently visible");
+        logger::info("[heel plan] no stocking candidate is currently visible");
         return;
     }
     if (footwear.empty()) {
@@ -568,7 +701,9 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
                 stocking->armorFormID,
                 shoe->armorFormID,
                 requestedNoHeel);
-            LogRecentAttachments();
+            if (g_config.debugDiagnostics) {
+                LogRecentAttachments();
+            }
             continue;
         }
 
@@ -707,7 +842,6 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
 
     switch (a_message->type) {
     case SKSE::MessagingInterface::kPostPostLoad:
-        LoadConfig();
         racemenu::Initialize();
         racemenu::SetAttachmentChangedCallback(QueueSnapshot);
         TryConnect();

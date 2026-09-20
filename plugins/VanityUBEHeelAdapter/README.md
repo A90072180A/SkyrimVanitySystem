@@ -87,3 +87,26 @@ this POC is the flat Converse profile.
 ## Phase 3.2 biped diagnostics
 
 If DAVE visual replacements are absent from the ordinary player scenegraph BODYTRI walk, the adapter now inspects the third-person BipedAnim `objects` and `bufferedObjects` partClone trees for all 32 biped slots. It logs item/addon FormIDs, BODYTRI paths, node roots, and geometry names. A local NoHeel pass is attempted only when a partClone BODYTRI stem exactly matches the configured SVS stocking model; otherwise the build remains diagnostic-only for that target.
+
+
+## Phase 4: stable IDs, continuous heel profiles, conservative auto-detection
+
+Phase 4 removes the test dependency on runtime FormIDs. Config entries may now use
+`Plugin.esp|localFormID`, which remains stable when the load order changes. Legacy
+`runtime:XXXXXXXX` entries are still accepted.
+
+Heel profiles remain continuous floats in the inclusive range `0.0..1.0`:
+`0.0` is the high-heel/base posture and `1.0` is the flat-foot `NoHeel`
+posture for the current UBE convention. Intermediate values are applied directly
+through the already validated scoped RaceMenu morph path.
+
+The adapter can also conservatively auto-detect obvious hosiery visual items from
+their SVS model paths and visual slots. Auto-detection currently requires a high
+confidence score; explicit config entries always win. Footwear target values are
+still profile-driven in this phase. Automatic heel-height estimation is intentionally
+left for the next phase so the validated local-morph path is not mixed with an
+unverified estimator.
+
+Set `debugDiagnostics` to `true` to restore the verbose logical-item and biped
+partClone dumps used during the POC. Normal operation now keeps only target,
+profile, and morph-result messages at info level.

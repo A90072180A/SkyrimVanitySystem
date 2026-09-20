@@ -1,9 +1,11 @@
 {
   "applyMorph": true,
+  "autoDetectStockings": true,
+  "debugDiagnostics": false,
   "stockings": [
-    "runtime:FE429D1A"
+    "[Caenarvon] Cosplay Basics.esp|00000D1A"
   ],
   "heels": {
-    "runtime:FE4AB80A": 1.0
+    "[AFxII] Converse AS.esp|0000080A": 1.0
   }
 }
