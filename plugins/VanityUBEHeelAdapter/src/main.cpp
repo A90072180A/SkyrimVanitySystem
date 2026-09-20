@@ -66,6 +66,7 @@ std::atomic_bool g_equipReapplyQueued{false};
 bool g_loggedUnavailable{false};
 bool g_equipSinkRegistered{false};
 ManualConfig g_config{};
+std::unordered_map<std::string, bool> g_noHeelCapabilityCache;
 
 void QueueSnapshot();
 
@@ -185,9 +186,70 @@ bool ContainsAnyToken(
     return false;
 }
 
+std::filesystem::path BodyTriDiskPath(std::string_view a_bodyTriPath)
+{
+    std::string relative(a_bodyTriPath);
+    std::ranges::replace(relative, '/', '\\');
+    while (!relative.empty() &&
+           (relative.front() == '\\' || relative.front() == '/')) {
+        relative.erase(relative.begin());
+    }
+    return std::filesystem::path{"Data"} /
+           "Meshes" /
+           std::filesystem::path{relative};
+}
+
+bool FileContainsAsciiToken(
+    const std::filesystem::path& a_path,
+    std::string_view a_token)
+{
+    std::ifstream stream(a_path, std::ios::binary);
+    if (!stream.is_open()) {
+        return false;
+    }
+
+    std::vector<char> bytes(
+        (std::istreambuf_iterator<char>(stream)),
+        std::istreambuf_iterator<char>());
+    if (bytes.empty() || a_token.empty()) {
+        return false;
+    }
+
+    return std::search(
+               bytes.begin(),
+               bytes.end(),
+               a_token.begin(),
+               a_token.end()) != bytes.end();
+}
+
+bool BodyTriSupportsNoHeel(std::string_view a_bodyTriPath)
+{
+    if (a_bodyTriPath.empty()) {
+        return false;
+    }
+
+    const std::string key(a_bodyTriPath);
+    if (const auto it = g_noHeelCapabilityCache.find(key);
+        it != g_noHeelCapabilityCache.end()) {
+        return it->second;
+    }
+
+    const auto diskPath = BodyTriDiskPath(a_bodyTriPath);
+    const bool supported = FileContainsAsciiToken(diskPath, "NoHeel");
+    g_noHeelCapabilityCache.emplace(key, supported);
+
+    logger::info(
+        "[morph capability] BODYTRI='{}' NoHeel={} path='{}'",
+        a_bodyTriPath,
+        supported,
+        diskPath.string());
+    return supported;
+}
+
 bool LoadConfig()
 {
     g_config = {};
+    g_noHeelCapabilityCache.clear();
 
     std::ifstream stream(std::filesystem::path{kConfigPath});
     if (!stream.is_open()) {
@@ -462,7 +524,10 @@ bool IsConfiguredOrAutoStocking(
     a_explicit = g_config.stockings.contains(a_item.armorFormID);
     a_profileMatched = MatchesStockingMorphProfile(a_item);
     a_confidence = StockingConfidence(a_item);
-    return a_explicit || a_profileMatched ||
+
+    // A custom morph profile is only an override for an already identified
+    // stocking; it is not itself proof that the visual is hosiery.
+    return a_explicit ||
            (g_config.autoDetectStockings && a_confidence >= 5);
 }
 
@@ -780,14 +845,17 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
                 profileStocking,
                 stockingConfidence)) {
             stockings.push_back(std::addressof(item));
+            if (g_config.debugDiagnostics && profileStocking) {
+                logger::info(
+                    "[stocking profile override available] ARMO={:08X}",
+                    item.armorFormID);
+            }
             logger::info(
                 "[stocking detected] ARMO={:08X} stable='{}' source={} "
                 "confidence={} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
-                explicitStocking
-                    ? "config"
-                    : (profileStocking ? "profile" : "auto"),
+                explicitStocking ? "config" : "auto",
                 stockingConfidence,
                 item.geometries.size());
             if (g_config.debugDiagnostics) {
@@ -867,6 +935,22 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 
         const auto morphProfile =
             ResolveMorphProfile(*stocking, match->geometry);
+
+        const bool explicitCustomMorph =
+            morphProfile.source != "default";
+        const bool hasValidatedNoHeel =
+            morphProfile.morph == "NoHeel" &&
+            BodyTriSupportsNoHeel(match->attachment.bodyTriPath);
+
+        if (!explicitCustomMorph && !hasValidatedNoHeel) {
+            logger::info(
+                "[heel plan] stockingARMO={:08X} BODYTRI='{}' "
+                "NoHeel=false; skipping non-morphable stocking",
+                stocking->armorFormID,
+                match->attachment.bodyTriPath);
+            continue;
+        }
+
         const auto targetMorphValue =
             MapPostureToMorph(requestedPosture, morphProfile);
 

@@ -159,3 +159,24 @@ SVS rule change.
 The local RaceMenu interface declarations were also aligned with the public
 skee ABI by removing virtual destructors from callback-only interfaces that do
 not have them upstream.
+
+
+## Phase 6: validate NoHeel from the actual runtime TRI
+
+Automatic stocking adaptation is now conservative by default. After SVS/DAVE
+resolves the real rendered stocking node, the adapter reads that node's BODYTRI
+file and checks whether the TRI actually contains the ASCII morph name
+`NoHeel`.
+
+Only a validated `NoHeel` stocking receives the default automatic heel
+adaptation. A hosiery item without `NoHeel` remains visible but is logged as
+non-morphable and left untouched.
+
+The previous experimental TooHotForYou / `HiHeelz_CBBE_to_UBE` profile was
+removed from the default config. `stockingMorphProfiles` remains available as
+an advanced explicit override for a future item whose alternate morph semantics
+are independently known and tested.
+
+Capability checks are cached by BODYTRI path for the session and cleared when
+the adapter config reloads, so rebuilding a TRI and reloading a save can be
+tested without stale capability data.
