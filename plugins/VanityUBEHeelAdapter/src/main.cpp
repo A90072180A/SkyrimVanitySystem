@@ -259,9 +259,6 @@ std::optional<AttachmentMatch> FindAttachment(
     const LogicalVisualItem& a_stocking)
 {
     const auto attachments = racemenu::GetPlayerAttachments();
-    if (attachments.empty()) {
-        return std::nullopt;
-    }
 
     // First preference: RaceMenu reports the same replacement ARMA that SVS
     // exposed. Pick the newest attachment when duplicate callbacks exist.
