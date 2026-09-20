@@ -335,7 +335,7 @@ std::optional<AttachmentMatch> FindAttachment(
                 continue;
             }
 
-            AttachmentRecord synthetic;
+            racemenu::AttachmentRecord synthetic;
             synthetic.object = scene.object;
             synthetic.bodyTriPath = scene.bodyTriPath;
             sceneMatch = AttachmentMatch{
