@@ -1,4 +1,5 @@
 #include "Plugin.h"
+#include "RaceMenuBridge.h"
 #include "api/SkyrimVanitySystemAPI.h"
 
 #include <nlohmann/json.hpp>
@@ -16,6 +17,7 @@ constexpr auto kConfigPath =
 struct ManualConfig {
     std::unordered_set<RE::FormID> stockings;
     std::unordered_map<RE::FormID, float> heelNoHeelByArmor;
+    bool applyMorph{true};
 };
 
 struct GeometryCandidate {
@@ -40,6 +42,12 @@ struct LogicalVisualItem {
     std::vector<GeometryCandidate> geometries;
 };
 
+struct AttachmentMatch {
+    racemenu::AttachmentRecord attachment;
+    std::string method;
+    GeometryCandidate geometry;
+};
+
 ISkyrimVanitySystemInterface001* g_svs{nullptr};
 ListenerHandle g_listenerHandle{0};
 std::atomic_bool g_snapshotQueued{false};
@@ -49,11 +57,6 @@ ManualConfig g_config{};
 const char* SafeString(const char* a_value)
 {
     return a_value ? a_value : "";
-}
-
-std::string FormatFormID(const RE::FormID a_formID)
-{
-    return std::format("{:08X}", a_formID);
 }
 
 std::string StableIdentifier(const RE::FormID a_formID)
@@ -154,10 +157,17 @@ bool LoadConfig()
             }
         }
 
+        if (const auto it = root.find("applyMorph");
+            it != root.end() && it->is_boolean()) {
+            g_config.applyMorph = it->get<bool>();
+        }
+
         logger::info(
-            "Loaded manual config: stockings={} heelProfiles={} path='{}'",
+            "Loaded manual config: stockings={} heelProfiles={} "
+            "applyMorph={} path='{}'",
             g_config.stockings.size(),
             g_config.heelNoHeelByArmor.size(),
+            g_config.applyMorph,
             kConfigPath);
         return true;
     } catch (const std::exception& exception) {
@@ -218,6 +228,94 @@ std::vector<LogicalVisualItem> BuildLogicalItems(const VisualState001& a_state)
     return items;
 }
 
+std::string NormalizeMeshStem(std::string_view a_path)
+{
+    std::string value(a_path);
+    std::ranges::transform(
+        value, value.begin(), [](const unsigned char a_char) {
+            return static_cast<char>(std::tolower(a_char));
+        });
+    std::ranges::replace(value, '/', '\\');
+
+    constexpr auto kMeshesPrefix = "meshes\\"sv;
+    if (value.starts_with(kMeshesPrefix)) {
+        value.erase(0, kMeshesPrefix.size());
+    }
+
+    const auto dot = value.find_last_of('.');
+    if (dot != std::string::npos) {
+        value.erase(dot);
+    }
+
+    if (value.size() >= 2 &&
+        value[value.size() - 2] == '_' &&
+        (value.back() == '0' || value.back() == '1')) {
+        value.resize(value.size() - 2);
+    }
+    return value;
+}
+
+std::optional<AttachmentMatch> FindAttachment(
+    const LogicalVisualItem& a_stocking)
+{
+    const auto attachments = racemenu::GetPlayerAttachments();
+    if (attachments.empty()) {
+        return std::nullopt;
+    }
+
+    // First preference: RaceMenu reports the same replacement ARMA that SVS
+    // exposed. Pick the newest attachment when duplicate callbacks exist.
+    std::optional<AttachmentMatch> exact;
+    for (const auto& geometry : a_stocking.geometries) {
+        for (const auto& attachment : attachments) {
+            if (geometry.armorAddonFormID == 0 ||
+                geometry.armorAddonFormID != attachment.armorAddonFormID ||
+                attachment.bodyTriPath.empty()) {
+                continue;
+            }
+
+            if (!exact.has_value() ||
+                attachment.sequence > exact->attachment.sequence) {
+                exact = AttachmentMatch{
+                    .attachment = attachment,
+                    .method = "exact-arma",
+                    .geometry = geometry};
+            }
+        }
+    }
+    if (exact.has_value()) {
+        return exact;
+    }
+
+    // DAVE may hand RaceMenu the source ARMA while replacing only the rendered
+    // model. In that case correlate the visible model with BODYTRI by path
+    // stem. BodySlide commonly uses foo_0/1.nif + foo.tri, so strip weight
+    // suffixes before comparison.
+    std::optional<AttachmentMatch> pathMatch;
+    for (const auto& geometry : a_stocking.geometries) {
+        const auto modelStem = NormalizeMeshStem(geometry.modelPath);
+        if (modelStem.empty()) {
+            continue;
+        }
+
+        for (const auto& attachment : attachments) {
+            if (attachment.bodyTriPath.empty() ||
+                NormalizeMeshStem(attachment.bodyTriPath) != modelStem) {
+                continue;
+            }
+
+            if (!pathMatch.has_value() ||
+                attachment.sequence > pathMatch->attachment.sequence) {
+                pathMatch = AttachmentMatch{
+                    .attachment = attachment,
+                    .method = "bodytri-stem",
+                    .geometry = geometry};
+            }
+        }
+    }
+    return pathMatch;
+}
+
 void LogLogicalItems(const std::vector<LogicalVisualItem>& a_items)
 {
     logger::info("[logical items] count={}", a_items.size());
@@ -237,8 +335,7 @@ void LogLogicalItems(const std::vector<LogicalVisualItem>& a_items)
             item.geometries.size());
 
         for (const auto trigger : item.triggerSlotMasks) {
-            logger::info(
-                "  [trigger] mask=0x{:016X}", trigger);
+            logger::info("  [trigger] mask=0x{:016X}", trigger);
         }
 
         for (const auto& geometry : item.geometries) {
@@ -253,7 +350,22 @@ void LogLogicalItems(const std::vector<LogicalVisualItem>& a_items)
     }
 }
 
-void LogManualResolution(const std::vector<LogicalVisualItem>& a_items)
+void LogRecentAttachments()
+{
+    const auto attachments = racemenu::GetPlayerAttachments();
+    logger::info("[RaceMenu attachment cache] count={}", attachments.size());
+    for (const auto& attachment : attachments) {
+        logger::info(
+            "  [attachment] seq={} ARMO={:08X} ARMA={:08X} "
+            "BODYTRI='{}'",
+            attachment.sequence,
+            attachment.armorFormID,
+            attachment.armorAddonFormID,
+            attachment.bodyTriPath);
+    }
+}
+
+void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 {
     std::vector<const LogicalVisualItem*> stockings;
     std::vector<std::pair<const LogicalVisualItem*, float>> footwear;
@@ -306,15 +418,57 @@ void LogManualResolution(const std::vector<LogicalVisualItem>& a_items)
         return;
     }
 
+    auto* player = RE::PlayerCharacter::GetSingleton();
     const auto* shoe = footwear.front().first;
     const auto requestedNoHeel = footwear.front().second;
+
     for (const auto* stocking : stockings) {
+        const auto match = FindAttachment(*stocking);
+        if (!match.has_value()) {
+            logger::warn(
+                "[heel plan] stockingARMO={:08X} footwearARMO={:08X} "
+                "requestedNoHeel={:.3f} attachmentMatch=none "
+                "morphApplied=false",
+                stocking->armorFormID,
+                shoe->armorFormID,
+                requestedNoHeel);
+            LogRecentAttachments();
+            continue;
+        }
+
+        logger::info(
+            "[stocking target] stockingARMO={:08X} candidateARMA={:08X} "
+            "matchedARMO={:08X} matchedARMA={:08X} method={} seq={} "
+            "BODYTRI='{}' model='{}'",
+            stocking->armorFormID,
+            match->geometry.armorAddonFormID,
+            match->attachment.armorFormID,
+            match->attachment.armorAddonFormID,
+            match->method,
+            match->attachment.sequence,
+            match->attachment.bodyTriPath,
+            match->geometry.modelPath);
+
+        bool applied = false;
+        if (g_config.applyMorph && player && match->attachment.object) {
+            applied = racemenu::ApplyScopedNoHeel(
+                player,
+                match->attachment.object.get(),
+                requestedNoHeel,
+                std::format(
+                    "stocking {:08X}/ARMA {:08X}",
+                    stocking->armorFormID,
+                    match->geometry.armorAddonFormID));
+        }
+
         logger::info(
             "[heel plan] stockingARMO={:08X} footwearARMO={:08X} "
-            "requestedNoHeel={:.3f} morphApplied=false",
+            "requestedNoHeel={:.3f} applyMorph={} morphApplied={}",
             stocking->armorFormID,
             shoe->armorFormID,
-            requestedNoHeel);
+            requestedNoHeel,
+            g_config.applyMorph,
+            applied);
     }
 }
 
@@ -336,33 +490,9 @@ void LogSnapshot(const VisualState001* a_state, void*)
         a_state->structureSize,
         a_state->pieceStructureSize);
 
-    for (std::uint32_t index = 0; index < a_state->pieceCount; ++index) {
-        const VisualPiece001& piece = a_state->pieces[index];
-        logger::info(
-            "[SVS piece {:02}] flags=0x{:08X} priority={} "
-            "variant='{}' actor={:08X} "
-            "sourceARMO={:08X} sourceARMA={:08X} "
-            "replacementARMO={:08X} replacementARMA={:08X} "
-            "triggerSlots=0x{:016X} sourceSlots=0x{:016X} "
-            "visualSlots=0x{:016X} model='{}'",
-            index,
-            piece.flags,
-            piece.variantPriority,
-            SafeString(piece.variantId),
-            piece.actorFormID,
-            piece.sourceArmorFormID,
-            piece.sourceArmorAddonFormID,
-            piece.replacementArmorFormID,
-            piece.replacementArmorAddonFormID,
-            piece.triggerSlotMask,
-            piece.sourceSlotMask,
-            piece.visualSlotMask,
-            SafeString(piece.actorModelPath));
-    }
-
     const auto logicalItems = BuildLogicalItems(*a_state);
     LogLogicalItems(logicalItems);
-    LogManualResolution(logicalItems);
+    ResolveAndApply(logicalItems);
 }
 
 bool TryConnect();
@@ -382,8 +512,6 @@ void QueueSnapshot()
 
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
-            logger::debug(
-                "Cannot query SVS visual state: player is not available");
             return;
         }
 
@@ -418,21 +546,7 @@ bool TryConnect()
 
     if (g_listenerHandle == 0) {
         g_listenerHandle = g_svs->RegisterVisualStateChangedListener(
-            [](const VisualState001* a_state, void*) {
-                if (a_state) {
-                    logger::debug(
-                        "SVS visual-state notification: revision={} pieces={} "
-                        "flags=0x{:08X}",
-                        a_state->revision,
-                        a_state->pieceCount,
-                        a_state->flags);
-                }
-
-                // SVS already queues its notification after requesting a DAVE
-                // refresh. Queue one more SKSE task so the adapter consumes a
-                // live snapshot on the next game-thread turn.
-                QueueSnapshot();
-            },
+            [](const VisualState001*, void*) { QueueSnapshot(); },
             nullptr);
 
         if (g_listenerHandle == 0) {
@@ -458,6 +572,8 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
     switch (a_message->type) {
     case SKSE::MessagingInterface::kPostPostLoad:
         LoadConfig();
+        racemenu::Initialize();
+        racemenu::SetAttachmentChangedCallback(QueueSnapshot);
         TryConnect();
         QueueSnapshot();
         break;
@@ -465,6 +581,7 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
     case SKSE::MessagingInterface::kDataLoaded:
     case SKSE::MessagingInterface::kPostLoadGame:
         LoadConfig();
+        racemenu::Initialize();
         TryConnect();
         QueueSnapshot();
         break;
@@ -492,7 +609,7 @@ SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
         "SKSE", vanity_ube_heel_adapter::HandleSKSEMessage);
 
     logger::info(
-        "{} {} loaded (manual-classification logging POC)",
+        "{} {} loaded (scoped-local-morph POC)",
         VanityUBEHeelAdapterPlugin::NAME,
         VanityUBEHeelAdapterPlugin::VERSION.string());
 

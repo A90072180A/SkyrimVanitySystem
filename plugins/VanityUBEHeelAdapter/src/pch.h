@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>

@@ -1,97 +1,85 @@
-# Vanity UBE Heel Adapter — phase 2 POC
+# Vanity UBE Heel Adapter — phase 3 scoped morph POC
 
-This branch now verifies the next layer of the SVS → adapter pipeline:
-logical-item aggregation plus **manual** stocking / footwear classification.
+Phase 3 adds the first real mesh mutation, but only through RaceMenu's public
+BodyMorph API and only on an attachment that can be correlated to the configured
+visual stocking.
 
-No mesh mutation is performed yet.
+## Important test condition
 
-## Current behavior
+For this POC, disable Automatic Stocking's own `NoHeel` writer while testing
+(or set its `noHighHeelSlideName` to an empty string). Otherwise a later
+actor-wide RaceMenu refresh can legitimately overwrite this local test value.
 
-The plugin:
+## What changed
 
-1. connects to Skyrim Vanity System Visual-State API 001;
-2. queries the player after SVS notifications;
-3. logs the raw `VisualPiece001` records;
-4. aggregates duplicate ARMA/source combinations into logical visual items keyed
-   by replacement ARMO;
-5. loads a small manual config;
-6. reports visible configured stockings and configured footwear;
-7. resolves the requested continuous `NoHeel` value in the log only.
+The adapter now:
 
-It still does **not**:
+- acquires RaceMenu/skee `BodyMorph` and `ActorUpdateManager` interfaces;
+- observes third-person player armor attachment callbacks;
+- caches the actual attached `NiAVObject` and its `BODYTRI` path;
+- correlates a configured SVS stocking geometry to an attached node:
+  1. exact replacement ARMA FormID;
+  2. fallback model/BODYTRI path-stem match;
+- applies a continuous target `NoHeel` value only to that node with
+  `IBodyMorphInterface::ApplyVertexDiff`.
 
-- auto-detect stockings;
-- auto-estimate heel height;
-- parse BODYTRI;
-- apply `NoHeel`;
-- touch OBody, UBE feet, shoes, or actor-wide RaceMenu morph state.
+It does **not** call actor-wide `ApplyBodyMorphs` or `UpdateModelWeight`.
+
+## Scoped morph mechanism
+
+RaceMenu still stores morph values per actor, so the adapter uses a temporary
+key named `VanityUBEHeelAdapter`:
+
+1. read the actor's current total `NoHeel`;
+2. subtract any pre-existing adapter key;
+3. temporarily set the adapter key so the total equals the desired target;
+4. call `ApplyVertexDiff(actor, stockingNode, false)`;
+5. immediately restore/clear the temporary key.
+
+This lets RaceMenu reset the node from its saved `SHAPEDATA` base and reapply
+all OBody / RaceMenu body sliders while the selected stocking alone sees the
+requested `NoHeel` total.
 
 ## Config
 
-Installed path:
-
-```text
-Data/SKSE/Plugins/VanityUBEHeelAdapter.json
-```
-
-Current POC schema:
-
 ```json
 {
-  "stockings": [
-    "runtime:FE429D1A"
-  ],
+  "applyMorph": true,
+  "stockings": ["runtime:FE429D1A"],
   "heels": {
     "runtime:FE4AB80A": 1.0
   }
 }
 ```
 
-The values are **runtime FormIDs** for this POC only.
+The included profile still uses the current test runtime FormIDs:
 
-The included defaults correspond to the latest test log:
-
-- `FE429D1A` — the visual CPB stocking item;
-- `FE4AB80A` — the visual Converse footwear item;
-- Converse is configured as `NoHeel = 1.0` (flat foot).
-
-Runtime FormIDs can change with load order. The adapter therefore also logs a
-stable `Plugin.esp|localFormID` identifier for every logical item and ARMA.
-A later phase will move the config to those stable identifiers.
+- `FE429D1A`: CPB stocking;
+- `FE4AB80A`: Converse;
+- Converse: `NoHeel = 1.0`.
 
 ## Expected log
 
-When both configured items are visible:
+A successful local pass should include:
 
 ```text
-[manual stocking] ARMO=FE429D1A ...
-[manual footwear] ARMO=FE4AB80A ... requestedNoHeel=1.000
-[heel plan] stockingARMO=FE429D1A footwearARMO=FE4AB80A requestedNoHeel=1.000 morphApplied=false
+[RaceMenu attach] ... BODYTRI='...'
+[stocking target] ... method=exact-arma|bodytri-stem ...
+[local morph] applied ... targetNoHeel=1.000 ...
+[heel plan] ... morphApplied=true
 ```
 
-For the stocking, every distinct replacement ARMA is also logged as a
-`stocking geometry candidate`. This is intentional: a logical stocking ARMO
-may contain the actual stocking mesh plus unrelated helper ARMA such as
-`FemaleHands`. Phase 3 will select the geometry that actually carries the
-`NoHeel` BODYTRI morph rather than morphing the whole ARMO.
+If no safe attachment match is found, the adapter does not mutate anything and
+prints the current RaceMenu attachment cache.
 
-## Test cases
+## First game test
 
-Repeat the successful phase-1 scenarios:
+1. Start with Automatic Stocking's `NoHeel` output disabled.
+2. Display the configured CPB stocking through SVS slot 32.
+3. Display the configured Converse through slot 37.
+4. Confirm the stocking visually becomes the flat-foot form.
+5. Remove/re-add the stocking and switch outfits a few times.
+6. Send the full `VanityUBEHeelAdapter.log`.
 
-1. slot 32 injects the stocking;
-2. slot 37 injects the stocking;
-3. slot 37 displays the configured Converse;
-4. preview / cancel preview;
-5. full outfit switching.
-
-For each case verify that:
-
-- the logical stocking ARMO is detected once even if raw pieces are duplicated;
-- the stocking lists all candidate geometries;
-- the Converse is detected as footwear only when visible;
-- the final `heel plan` appears only when both a configured stocking and one
-  configured footwear item are present;
-- the line always ends with `morphApplied=false`.
-
-Do not proceed to TRI mutation until these logs match the visible game state.
+Do not test arbitrary high heels yet; the only configured footwear target in
+this POC is the flat Converse profile.
