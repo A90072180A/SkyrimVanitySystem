@@ -210,3 +210,23 @@ The bundled Converse manual profile remains in place, so this phase can compare
 the automatic BodySlide candidate against the known-good manual value without
 risking the validated stocking behavior. Look for
 `[footwear auto candidate]` in the log.
+
+
+## Phase 7.1: non-blocking BodySlide indexing
+
+The first Phase 7 implementation built the BodySlide index lazily on the game
+thread. On a large setup this caused a visible freeze while thousands of OSP/XML
+files were opened and parsed.
+
+The index is now prewarmed on a background `std::jthread` after DataLoaded.
+If footwear is evaluated before indexing finishes, the resolver returns
+immediately instead of waiting. Manual footwear profiles continue to work during
+that interval. When indexing completes, the worker queues a fresh SVS
+evaluation so automatic candidates become available without another outfit
+change.
+
+Look for:
+`[bodyslide] starting asynchronous index build`,
+`[bodyslide posture] index not ready; returning without blocking the game thread`,
+and finally
+`[bodyslide] asynchronous index ready in ...s`.

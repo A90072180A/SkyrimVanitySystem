@@ -1,12 +1,15 @@
 #include "BodySlidePostureResolver.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -38,7 +41,16 @@ struct PresetRecord {
     SliderValues noHeel;
 };
 
-bool g_indexBuilt{false};
+enum class IndexState : std::uint8_t {
+    kNotStarted,
+    kBuilding,
+    kReady,
+    kFailed
+};
+
+std::atomic<IndexState> g_indexState{IndexState::kNotStarted};
+std::atomic_bool g_loggedIndexPending{false};
+std::jthread g_indexThread;
 std::unordered_map<std::string, std::vector<SliderSetRecord>> g_setsByModel;
 std::unordered_map<std::string, std::vector<PresetRecord>> g_presetsBySet;
 
@@ -370,7 +382,9 @@ std::string JoinOutputModel(
     return a_outputPath + "\\" + a_outputFile;
 }
 
-void ScanSliderSets(const bool a_diagnostics)
+bool ScanSliderSets(
+    const bool a_diagnostics,
+    const std::stop_token a_stop)
 {
     const std::filesystem::path root{
         "Data/CalienteTools/BodySlide/SliderSets"};
@@ -378,7 +392,7 @@ void ScanSliderSets(const bool a_diagnostics)
         logger::warn(
             "[bodyslide] SliderSets directory not found at '{}'",
             root.string());
-        return;
+        return true;
     }
 
     std::size_t files = 0;
@@ -391,6 +405,9 @@ void ScanSliderSets(const bool a_diagnostics)
          end;
          it != end;
          it.increment(ec)) {
+        if (a_stop.stop_requested()) {
+            return false;
+        }
         if (ec) {
             ec.clear();
             continue;
@@ -467,9 +484,10 @@ void ScanSliderSets(const bool a_diagnostics)
             noHeelSets,
             hiHeelSets);
     }
+    return !a_stop.stop_requested();
 }
 
-void ScanPresets()
+bool ScanPresets(const std::stop_token a_stop)
 {
     const std::filesystem::path root{
         "Data/CalienteTools/BodySlide/SliderPresets"};
@@ -477,7 +495,7 @@ void ScanPresets()
         logger::warn(
             "[bodyslide] SliderPresets directory not found at '{}'",
             root.string());
-        return;
+        return true;
     }
 
     std::size_t files = 0;
@@ -490,6 +508,9 @@ void ScanPresets()
          end;
          it != end;
          it.increment(ec)) {
+        if (a_stop.stop_requested()) {
+            return false;
+        }
         if (ec) {
             ec.clear();
             continue;
@@ -537,19 +558,38 @@ void ScanPresets()
         "[bodyslide] indexed SliderPresets files={} zeroedPresetEntries={}",
         files,
         zeroed);
+    return !a_stop.stop_requested();
 }
 
-void EnsureIndex(const bool a_diagnostics)
+void BuildIndex(
+    const bool a_diagnostics,
+    const std::stop_token a_stop,
+    const IndexReadyCallback a_readyCallback)
 {
-    if (g_indexBuilt) {
-        return;
-    }
+    const auto started = std::chrono::steady_clock::now();
 
     g_setsByModel.clear();
     g_presetsBySet.clear();
-    ScanSliderSets(a_diagnostics);
-    ScanPresets();
-    g_indexBuilt = true;
+
+    if (!ScanSliderSets(a_diagnostics, a_stop) ||
+        !ScanPresets(a_stop) ||
+        a_stop.stop_requested()) {
+        logger::info("[bodyslide] asynchronous index build cancelled");
+        return;
+    }
+
+    g_indexState.store(IndexState::kReady, std::memory_order_release);
+    g_loggedIndexPending.store(false);
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    logger::info(
+        "[bodyslide] asynchronous index ready in {:.3f}s",
+        static_cast<double>(elapsed.count()) / 1000.0);
+
+    if (a_readyCallback) {
+        a_readyCallback();
+    }
 }
 
 float Interpolate(
@@ -650,9 +690,60 @@ std::optional<PostureCandidate> CandidateFromSet(
 
 void Reset()
 {
-    g_indexBuilt = false;
+    if (g_indexThread.joinable()) {
+        g_indexThread.request_stop();
+        g_indexThread.join();
+    }
+
     g_setsByModel.clear();
     g_presetsBySet.clear();
+    g_loggedIndexPending.store(false);
+    g_indexState.store(IndexState::kNotStarted, std::memory_order_release);
+}
+
+void PrepareAsync(
+    const bool a_diagnostics,
+    const IndexReadyCallback a_readyCallback)
+{
+    auto expected = IndexState::kNotStarted;
+    if (!g_indexState.compare_exchange_strong(
+            expected,
+            IndexState::kBuilding,
+            std::memory_order_acq_rel)) {
+        if (expected == IndexState::kReady && a_readyCallback) {
+            a_readyCallback();
+        }
+        return;
+    }
+
+    logger::info("[bodyslide] starting asynchronous index build");
+
+    g_indexThread = std::jthread(
+        [a_diagnostics, a_readyCallback](const std::stop_token a_stop) {
+            try {
+                BuildIndex(a_diagnostics, a_stop, a_readyCallback);
+            } catch (const std::exception& exception) {
+                logger::error(
+                    "[bodyslide] asynchronous index build failed: {}",
+                    exception.what());
+                g_indexState.store(
+                    IndexState::kFailed,
+                    std::memory_order_release);
+            } catch (...) {
+                logger::error(
+                    "[bodyslide] asynchronous index build failed with "
+                    "unknown exception");
+                g_indexState.store(
+                    IndexState::kFailed,
+                    std::memory_order_release);
+            }
+        });
+}
+
+bool IsReady()
+{
+    return g_indexState.load(std::memory_order_acquire) ==
+           IndexState::kReady;
 }
 
 std::optional<PostureCandidate> ResolvePosture(
@@ -660,8 +751,21 @@ std::optional<PostureCandidate> ResolvePosture(
     const float a_actorWeight,
     const bool a_diagnostics)
 {
-    EnsureIndex(a_diagnostics);
+    const auto state =
+        g_indexState.load(std::memory_order_acquire);
+    if (state != IndexState::kReady) {
+        if (state == IndexState::kNotStarted) {
+            PrepareAsync(a_diagnostics, nullptr);
+        }
+        if (!g_loggedIndexPending.exchange(true)) {
+            logger::info(
+                "[bodyslide posture] index not ready; returning without "
+                "blocking the game thread");
+        }
+        return std::nullopt;
+    }
 
+    g_loggedIndexPending.store(false);
     std::optional<PostureCandidate> resolved;
     for (const auto& path : a_modelPaths) {
         const auto stem = NormalizeModelStem(path);

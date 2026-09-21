@@ -18,7 +18,13 @@ struct PostureCandidate {
     std::string sourceFile;
 };
 
+using IndexReadyCallback = void (*)();
+
 void Reset();
+void PrepareAsync(
+    bool a_diagnostics,
+    IndexReadyCallback a_readyCallback = nullptr);
+bool IsReady();
 
 std::optional<PostureCandidate> ResolvePosture(
     std::span<const std::string> a_modelPaths,

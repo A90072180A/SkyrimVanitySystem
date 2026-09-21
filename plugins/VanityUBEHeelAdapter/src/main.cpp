@@ -254,7 +254,6 @@ bool LoadConfig()
 {
     g_config = {};
     g_noHeelCapabilityCache.clear();
-    bodyslide::Reset();
 
     std::ifstream stream(std::filesystem::path{kConfigPath});
     if (!stream.is_open()) {
@@ -1224,6 +1223,13 @@ void QueueSnapshot()
     }
 }
 
+void OnBodySlideIndexReady()
+{
+    logger::info(
+        "[bodyslide] index-ready callback; queueing SVS reevaluation");
+    QueueSnapshot();
+}
+
 bool TryConnect()
 {
     if (!g_svs) {
@@ -1362,6 +1368,10 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
 
     case SKSE::MessagingInterface::kDataLoaded:
         LoadConfig();
+        bodyslide::Reset();
+        bodyslide::PrepareAsync(
+            g_config.debugDiagnostics,
+            OnBodySlideIndexReady);
         racemenu::Initialize();
         RegisterEquipEventSink();
         TryConnect();

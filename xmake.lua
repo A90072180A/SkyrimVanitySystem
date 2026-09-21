@@ -57,7 +57,7 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.7.0")
+    set_version("0.7.1")
 
     add_deps("commonlibsse-ng")
     add_packages("nlohmann_json")
