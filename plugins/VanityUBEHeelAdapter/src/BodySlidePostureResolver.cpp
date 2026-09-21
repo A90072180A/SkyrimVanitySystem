@@ -1,7 +1,6 @@
 #include "BodySlidePostureResolver.h"
 
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -15,8 +14,8 @@ namespace vanity_ube_heel_adapter::bodyslide {
 namespace {
 
 struct SliderValues {
-    std::optional<float> small;
-    std::optional<float> big;
+    std::optional<float> lowWeight;
+    std::optional<float> highWeight;
 
     bool Complete() const
     {
@@ -302,11 +301,11 @@ SliderValues ParseSlider(
             continue;
         }
 
-        if (const auto small = Attribute(tag, "small")) {
-            result.small = ParseFloat(*small);
+        if (const auto lowWeight = Attribute(tag, "small")) {
+            result.lowWeight = ParseFloat(*lowWeight);
         }
-        if (const auto big = Attribute(tag, "big")) {
-            result.big = ParseFloat(*big);
+        if (const auto highWeight = Attribute(tag, "big")) {
+            result.highWeight = ParseFloat(*highWeight);
         }
         break;
     }
@@ -338,9 +337,9 @@ SliderValues ParsePresetSlider(
 
         const auto lowerSize = LowerCopy(*size);
         if (lowerSize == "small") {
-            result.small = *value;
+            result.lowWeight = *value;
         } else if (lowerSize == "big") {
-            result.big = *value;
+            result.highWeight = *value;
         }
     }
     return result;
@@ -453,12 +452,12 @@ void ScanSliderSets(const bool a_diagnostics)
         std::size_t hiHeelSets = 0;
         for (const auto& [_, records] : g_setsByModel) {
             for (const auto& record : records) {
-                if (record.noHeel.small.has_value() ||
-                    record.noHeel.big.has_value()) {
+                if (record.noHeel.lowWeight.has_value() ||
+                    record.noHeel.highWeight.has_value()) {
                     ++noHeelSets;
                 }
-                if (record.hiHeelz.small.has_value() ||
-                    record.hiHeelz.big.has_value()) {
+                if (record.hiHeelz.lowWeight.has_value() ||
+                    record.hiHeelz.highWeight.has_value()) {
                     ++hiHeelSets;
                 }
             }
@@ -578,12 +577,12 @@ std::optional<PostureCandidate> CandidateFromSet(
             }
 
             PostureCandidate candidate;
-            candidate.smallValue = *preset.noHeel.small;
-            candidate.bigValue = *preset.noHeel.big;
+            candidate.lowWeightValue = *preset.noHeel.lowWeight;
+            candidate.highWeightValue = *preset.noHeel.highWeight;
             candidate.posture = std::clamp(
                 Interpolate(
-                    candidate.smallValue,
-                    candidate.bigValue,
+                    candidate.lowWeightValue,
+                    candidate.highWeightValue,
                     a_actorWeight) /
                     100.0F,
                 0.0F,
@@ -616,12 +615,12 @@ std::optional<PostureCandidate> CandidateFromSet(
 
     if (a_set.noHeel.Complete()) {
         PostureCandidate candidate;
-        candidate.smallValue = *a_set.noHeel.small;
-        candidate.bigValue = *a_set.noHeel.big;
+        candidate.lowWeightValue = *a_set.noHeel.lowWeight;
+        candidate.highWeightValue = *a_set.noHeel.highWeight;
         candidate.posture = std::clamp(
             Interpolate(
-                candidate.smallValue,
-                candidate.bigValue,
+                candidate.lowWeightValue,
+                candidate.highWeightValue,
                 a_actorWeight) /
                 100.0F,
             0.0F,
@@ -635,8 +634,8 @@ std::optional<PostureCandidate> CandidateFromSet(
     }
 
     if (a_diagnostics &&
-        (a_set.hiHeelz.small.has_value() ||
-         a_set.hiHeelz.big.has_value())) {
+        (a_set.hiHeelz.lowWeight.has_value() ||
+         a_set.hiHeelz.highWeight.has_value())) {
         logger::info(
             "[bodyslide posture] set='{}' model='{}' has "
             "HiHeelz_CBBE but no usable NoHeel; not inferred",
