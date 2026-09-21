@@ -1,7 +1,7 @@
 #include "FootBasisIO.h"
 #include "TriMorphCore.h"
+#include "FootCapturePolicy.h"
 #include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -18,49 +18,51 @@ struct Cached {
     std::filesystem::file_time_type modified{};
     Json result;
 };
-// Owned exclusively by the snapshot writer thread. Not a persistent index.
+// Writer-owned, bounded session caches. Never game-thread I/O or an applied profile.
 std::unordered_map<std::string, Cached> cache;
-std::optional<std::filesystem::path> ResourcePath(std::string value) {
-    std::replace(value.begin(), value.end(), '\\', '/');
-    if (value.empty() || value.front() == '/' || value.find(':') != std::string::npos) return {};
-    std::string lower = value;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower.starts_with("data/meshes/")) value.erase(0, 12);
-    else if (lower.starts_with("meshes/")) value.erase(0, 7);
-    std::filesystem::path relative(value);
-    for (const auto& component : relative) if (component == "..") return {};
-    auto extension = relative.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (extension != ".tri") return {};
-    return std::filesystem::path("Data/Meshes") / relative;
-}
-Json ReadBasis(const std::string& resource, std::uint32_t limit) {
-    Json out = {{"resource", resource}, {"shape", "Feet"}, {"morph", "NoHeel"},
+struct LastFile {
+    std::string path;
+    std::uintmax_t size{};
+    std::filesystem::file_time_type modified{};
+    std::vector<std::uint8_t> bytes;
+};
+std::optional<LastFile> lastFile;
+Json ReadBasis(const std::string& resource, const std::string& shape,
+               const std::string& morph, std::uint32_t limit)
+{
+    Json out = {{"resource", resource}, {"shape", shape}, {"morph", morph},
         {"readScope", "MO2-visible loose files; BSA-only resources are not read by this worker"},
         {"status", "resource-unreadable"}, {"offsets", Json::array()},
-        {"vertexLimitChecked", limit}, {"referenceTopologyValidated", false}};
-    const auto path = ResourcePath(resource);
-    if (!path) { out["status"] = "invalid-resource-path"; return out; }
+        {"vertexLimitChecked", limit}, {"referenceTopologyValidated", false},
+        {"mappingToNoHeel", nullptr}, {"automaticApplicationAllowed", false}};
+    const auto normalized = foot_capture_policy::ResourceKey(resource);
+    if (normalized.empty() || !normalized.ends_with(".tri")) {
+        out["status"] = "invalid-resource-path"; return out;
+    }
+    const auto path = std::filesystem::path("Data/Meshes") / normalized;
     std::error_code ec;
-    const auto size = std::filesystem::file_size(*path, ec);
+    const auto size = std::filesystem::file_size(path, ec);
     if (ec) { out["error"] = ec.message(); return out; }
-    const auto modified = std::filesystem::last_write_time(*path, ec);
+    const auto modified = std::filesystem::last_write_time(path, ec);
     if (ec) { out["error"] = ec.message(); return out; }
-    const auto key = path->generic_string() + "|" + std::to_string(limit);
+    const auto key = Json::array({normalized, shape, morph, limit}).dump();
     if (const auto found = cache.find(key); found != cache.end() && found->second.size == size && found->second.modified == modified)
         return found->second.result;
     if (size > 64u * 1024u * 1024u) { out["status"] = "file-too-large"; return out; }
-    std::ifstream stream(*path, std::ios::binary);
-    if (!stream) return out;
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (size && !stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size))) {
-        out["status"] = "resource-read-failed"; return out;
+    if (!lastFile || lastFile->path != normalized || lastFile->size != size || lastFile->modified != modified) {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) return out;
+        LastFile file{normalized, size, modified, std::vector<std::uint8_t>(static_cast<std::size_t>(size))};
+        if (size && !stream.read(reinterpret_cast<char*>(file.bytes.data()), static_cast<std::streamsize>(size))) {
+            out["status"] = "resource-read-failed"; return out;
+        }
+        const auto afterSize = std::filesystem::file_size(path, ec);
+        if (ec || afterSize != size) { out["status"] = "resource-changed-during-read"; return out; }
+        const auto afterTime = std::filesystem::last_write_time(path, ec);
+        if (ec || afterTime != modified) { out["status"] = "resource-changed-during-read"; return out; }
+        lastFile = std::move(file);
     }
-    const auto afterSize = std::filesystem::file_size(*path, ec);
-    if (ec || afterSize != size) { out["status"] = "resource-changed-during-read"; return out; }
-    const auto afterTime = std::filesystem::last_write_time(*path, ec);
-    if (ec || afterTime != modified) { out["status"] = "resource-changed-during-read"; return out; }
-    const auto parsed = tri::Parse(bytes, "Feet", "NoHeel", limit);
+    const auto parsed = tri::Parse(lastFile->bytes, shape, morph, limit);
     out["status"] = parsed.status;
     out["error"] = parsed.error;
     out["sourceBytes"] = size;
@@ -68,33 +70,57 @@ Json ReadBasis(const std::string& resource, std::uint32_t limit) {
     out["fingerprintAlgorithm"] = "FNV1a64 of file bytes; diagnostic, not cryptographic";
     out["shapeNames"] = parsed.shapeNames;
     out["morphNamesForShape"] = parsed.morphNames;
-    out["deltaSemantics"] = "packed position differences per 1.0 morph unit; baseline/direction not calibrated";
+    out["deltaSemantics"] = "displacements per one unit of THIS named morph; no alias, endpoint or sign inferred";
     for (const auto& offset : parsed.offsets) out["offsets"].push_back({{"index", offset.index}, {"delta", offset.delta}});
     out["nonzeroOffsetCount"] = parsed.offsets.size();
-    // Only a completed structural parse can establish present/absent. An I/O
-    // failure and a malformed/unsupported TRI never become 'NoHeel=false'.
-    logger::info("[NoHeel basis] resource='{}' status={} shape=Feet offsets={}", resource, parsed.status, parsed.offsets.size());
+    logger::info("[morph measurement] resource='{}' shape='{}' morph='{}' status={} offsets={} autoApply=false",
+        resource, shape, morph, parsed.status, parsed.offsets.size());
     if (cache.size() >= 64) cache.clear();
     cache.insert_or_assign(key, Cached{size, modified, out});
     return out;
 }
+std::vector<std::string> MorphRequests(const Json& document)
+{
+    // NoHeel is always measured independently; other names are NEVER aliases.
+    std::vector<std::string> names{"NoHeel"};
+    if (document.value("geometryRole", std::string{"foot"}) == "stocking") return names;
+    if (document.contains("requestedDiagnosticMorphs") && document["requestedDiagnosticMorphs"].is_array()) {
+        for (const auto& entry : document["requestedDiagnosticMorphs"]) {
+            if (!entry.is_string() || names.size() >= 4) continue;
+            const auto value = entry.get<std::string>();
+            if (!value.empty() && value.size() <= 255 && std::find(names.begin(), names.end(), value) == names.end()) names.push_back(value);
+        }
+    }
+    return names;
 }
-void Enrich(Json& document) {
+}
+void Enrich(Json& document)
+{
     document["triMorphData"] = Json::array();
+    document["nativeMorphMeasurements"] = Json::array();
+    document["referenceMorphMeasurements"] = Json::array();
     const auto count = document.at("positions").size();
     const auto limit = count > 0 && count <= 65535 ? static_cast<std::uint32_t>(count) : 65536u;
+    const auto shape = document.value("geometry", std::string{"Feet"});
+    const auto morphs = MorphRequests(document);
     std::unordered_set<std::string> visited;
     for (const auto& entry : document.at("identity").at("bodyTriPaths")) {
         if (!entry.is_string()) continue;
         const auto resource = entry.get<std::string>();
         if (visited.size() >= 8) { document["triMorphDataTruncated"] = true; break; }
         if (!visited.insert(resource).second) continue;
-        document["triMorphData"].push_back(ReadBasis(resource, limit));
+        for (const auto& morph : morphs) {
+            auto result = ReadBasis(resource, shape, morph, limit);
+            if (morph == "NoHeel") document["triMorphData"].push_back(result);
+            document["nativeMorphMeasurements"].push_back(std::move(result));
+        }
     }
-    // This optional independent resource supplies a measured delta, NOT a
-    // certified topology or a guessed flat/heel endpoint for the observed shoe.
     const auto reference = document.value("requestedReferenceBodyTri", std::string{});
-    if (!reference.empty()) document["referenceTriBasis"] = ReadBasis(reference, 65536u);
+    if (!reference.empty()) for (const auto& morph : morphs) {
+        auto result = ReadBasis(reference, "Feet", morph, 65536u);
+        if (morph == "NoHeel") document["referenceTriBasis"] = result;
+        document["referenceMorphMeasurements"].push_back(std::move(result));
+    }
     document["referenceCalibration"] = {{"status", "not-calibrated"}, {"posture", nullptr}};
 }
 } // namespace vanity_ube_heel_adapter::foot_basis_io

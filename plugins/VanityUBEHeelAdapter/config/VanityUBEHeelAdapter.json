@@ -8,7 +8,9 @@
   "geometryDiagnostics": true,
   "writeGeneratedProfiles": true,
   "exportFootGeometry": true,
+  "exportStockingCalibration": true,
   "referenceBodyTri": "!UBE\\Feet\\femalefeet_tangent.tri",
+  "diagnosticFootMorphs": ["NoHeel", "HiHeelz_CBBE", "HiHeelz_CBBE_to_UBE"],
   "stockings": [
     "[Caenarvon] Cosplay Basics.esp|00000D1A"
   ],

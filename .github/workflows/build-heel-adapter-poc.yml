@@ -20,6 +20,10 @@ jobs:
           g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/TriMorphCoreTests.cpp -o tri-morph-tests
           ./tri-morph-tests
           python3 -m py_compile plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py
+      - name: Validate live selection and retry policy
+        run: |
+          g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/FootCapturePolicyTests.cpp -o foot-policy-tests
+          ./foot-policy-tests
 
   build:
     needs: core-tests
@@ -44,14 +48,14 @@ jobs:
           xmake f -y --builddir=build/runtime/flat --skyrim_se=y --skyrim_ae=y --skyrim_vr=n -m releasedbg
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test decoder and TRI parser with MSVC
+      - name: Test portable cores with MSVC
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'MSVC installation not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 plugins\VanityUBEHeelAdapter\tests\FootSnapshotCoreTests.cpp /Fe:foot-snapshot-tests.exe && foot-snapshot-tests.exe && cl /nologo /EHsc /std:c++20 /W4 plugins\VanityUBEHeelAdapter\tests\TriMorphCoreTests.cpp /Fe:tri-morph-tests.exe && tri-morph-tests.exe"
+          cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 plugins\VanityUBEHeelAdapter\tests\FootSnapshotCoreTests.cpp /Fe:foot-snapshot-tests.exe && foot-snapshot-tests.exe && cl /nologo /EHsc /std:c++20 /W4 plugins\VanityUBEHeelAdapter\tests\TriMorphCoreTests.cpp /Fe:tri-morph-tests.exe && tri-morph-tests.exe && cl /nologo /EHsc /std:c++20 /W4 plugins\VanityUBEHeelAdapter\tests\FootCapturePolicyTests.cpp /Fe:foot-policy-tests.exe && foot-policy-tests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build adapter
@@ -69,7 +73,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'artifact/tools' | Out-Null
           Copy-Item $dll 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll'
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
-          Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE10-TEST.md' 'artifact/PHASE10-TEST.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE11-TEST.md' 'artifact/PHASE11-TEST.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
 
       - name: Upload artifact
