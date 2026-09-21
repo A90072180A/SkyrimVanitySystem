@@ -32,6 +32,8 @@ struct View {
     std::uint32_t stride{}, componentBytes{}, positionSpan{}, bufferBytes{}, boneCount{};
     std::uint32_t shapeVertices{}, shapeTriangles{}, fault{};
     std::uint64_t descriptor{};
+    RE::NiTransform bindTransform{};
+    bool bindAvailable{false};
     const std::uint8_t* vertexData{};
     const std::uint16_t* indices{};
     const std::uint16_t* vertexMap{};
@@ -49,6 +51,10 @@ void Probe(RE::BSGeometry* geometry, View* out) noexcept
         }
         auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get();
         if (!skin || !skin->skinPartition) { out->status = "no-skin-partition"; return; }
+        if (auto* data = skin->skinData.get()) {
+            std::memcpy(&out->bindTransform, &data->rootParentToSkin, sizeof(out->bindTransform));
+            out->bindAvailable = true;
+        }
         auto* master = skin->skinPartition.get();
         out->partitions = master->numPartitions;
         out->vertices = master->vertexCount;
@@ -204,7 +210,7 @@ void Capture()
     if (!base) return;
     const auto& biped = player->GetBiped(false);
     if (!biped) return;
-    const auto& part = biped->objects[37 - 30]; // active only, NEVER bufferedObjects
+    const auto& part = biped->objects[37 - 30];
     RE::NiPointer<RE::NiAVObject> root = part.partClone;
     if (!root || !part.item || !part.addon) return;
     const auto armor = Stable(part.item), addon = Stable(part.addon);
@@ -249,11 +255,8 @@ void Capture()
             {"positionSpanBytes", view.positionSpan}, {"componentBytes", view.componentBytes},
             {"gpuAllocationBytes", view.bufferBytes}, {"vertexMap", mapKind}, {"accessFault", view.fault},
             {"positionSource", "skin-partition.buffData.rawVertexData"}, {"indexSource", "skin-partition.triList"}};
-        Json bind = nullptr;
-        if (auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get(); skin && skin->skinData) {
-            RE::NiTransform transform{};
-            if (CopyBytes(&transform, &skin->skinData->rootParentToSkin, sizeof(transform))) bind = Transform(transform);
-        }
+        // Do not dereference skin/skinData again outside the guarded probe.
+        const Json bind = view.bindAvailable ? Transform(view.bindTransform) : Json(nullptr);
         Json document = {{"schema", 1}, {"generatorVersion", "0.9.0"},
             {"source", "active-biped-foot-snapshot"}, {"status", "diagnostic-only"},
             {"identity", {{"armor", armor}, {"addon", addon}, {"armaModel", modelPath},
@@ -273,9 +276,9 @@ void Capture()
             document["positions"] = decoded.positions;
             document["triangles"] = decoded.triangles;
         }
-        const std::string keySource = armor + "|" + addon + "|" + modelPath + "|" + morphHash + "|" +
-            std::to_string(base->GetWeight()) + "|" + std::to_string(decoded.topologyHash) + "|" +
-            std::to_string(decoded.positionHash) + "|" + decoded.status + "|" + bind.dump();
+        const std::string keySource = document["identity"].dump() + "|" + morphHash + "|" +
+            std::to_string(decoded.topologyHash) + "|" + std::to_string(decoded.positionHash) + "|" +
+            decoded.status + "|" + bind.dump() + "|" + document["localTransform"].dump();
         const auto key = std::format("{:016x}", core::HashText(keySource));
         document["captureKey"] = key;
         logger::info("[foot snapshot] armor='{}' addon='{}' status={} decodedVertices={} decodedTriangles={} map={}",
