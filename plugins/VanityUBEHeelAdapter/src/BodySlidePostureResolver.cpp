@@ -19,7 +19,7 @@ struct SliderValues {
 
     bool Complete() const
     {
-        return small.has_value() && big.has_value();
+        return lowWeight.has_value() && highWeight.has_value();
     }
 };
 

@@ -969,8 +969,8 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
                 autoCandidate->source,
                 autoCandidate->setName,
                 autoCandidate->posture,
-                autoCandidate->smallValue,
-                autoCandidate->bigValue,
+                autoCandidate->lowWeightValue,
+                autoCandidate->highWeightValue,
                 autoCandidate->highConfidence ? "high" : "low",
                 hasManual);
         }

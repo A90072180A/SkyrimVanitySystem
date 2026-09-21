@@ -9,8 +9,8 @@ namespace vanity_ube_heel_adapter::bodyslide {
 
 struct PostureCandidate {
     float posture{0.0F};
-    float smallValue{0.0F};
-    float bigValue{0.0F};
+    float lowWeightValue{0.0F};
+    float highWeightValue{0.0F};
     bool highConfidence{false};
     std::string source;
     std::string setName;
