@@ -15,11 +15,17 @@ Converse and Glass native foot fits also ran. These are measured facts from that
 test, not a guarantee about all future attachment timing or all outfits.
 
 An offline surface-correspondence experiment, anchored to Converse + CPB at
-NoHeel=1, gave raw CPB NoHeel candidates of about -0.7385 for Glass and -0.0462 for
-an older Gala snapshot. They are OUTSIDE the currently accepted 0..1 interval and
-are NOT values to install. This experiment uses a constant reference cloth-gap
-vector, not a physically exact cloth solver; residuals and correspondence errors
-are material. In particular, NoHeel=1-HiHeelz is not used or justified.
+NoHeel=1, gave a raw CPB NoHeel candidate of about -0.7385 for Glass. It is OUTSIDE
+the currently accepted 0..1 interval and is NOT a value to install. This experiment
+uses a constant reference cloth-gap vector, not a physically exact cloth solver;
+residuals and correspondence errors are material. In particular,
+NoHeel=1-HiHeelz is not used or justified.
+
+An older Gala snapshot was also passed through the numerical kernel as an
+exploratory calculation, but its actor-morph context differs from this reference.
+It is excluded from calibration evidence. The background integration requires
+full context equality and will not pair it with this anchor. Test Gala again in
+the same session/context to obtain a valid new comparison.
 
 ## New background processing
 
