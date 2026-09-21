@@ -8,6 +8,7 @@
   "geometryDiagnostics": true,
   "writeGeneratedProfiles": true,
   "exportFootGeometry": true,
+  "referenceBodyTri": "!UBE\\Feet\\femalefeet_tangent.tri",
   "stockings": [
     "[Caenarvon] Cosplay Basics.esp|00000D1A"
   ],

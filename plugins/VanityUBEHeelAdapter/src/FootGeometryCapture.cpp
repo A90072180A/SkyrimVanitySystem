@@ -1,5 +1,6 @@
 #include "FootGeometryCapture.h"
 #include "FootSnapshotCore.h"
+#include "FootBasisIO.h"
 #include "SkeeAPI.h"
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -39,15 +40,13 @@ struct View {
     const std::uint16_t* vertexMap{};
     const char* status{"probe-not-run"};
 };
-// Deliberately supports only one full, non-strip partition. No GPU readback,
-// no reinterpretation of legacy NiGeometry, no guessed vertex-map semantics.
+// Only one full, non-strip partition. No GPU readback or guessed map semantics.
 void Probe(RE::BSGeometry* geometry, View* out) noexcept
 {
     __try {
         if (auto* tri = geometry->AsTriShape()) {
             const auto& rt = tri->GetTrishapeRuntimeData();
-            out->shapeVertices = rt.vertexCount;
-            out->shapeTriangles = rt.triangleCount;
+            out->shapeVertices = rt.vertexCount; out->shapeTriangles = rt.triangleCount;
         }
         auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get();
         if (!skin || !skin->skinPartition) { out->status = "no-skin-partition"; return; }
@@ -56,13 +55,10 @@ void Probe(RE::BSGeometry* geometry, View* out) noexcept
             out->bindAvailable = true;
         }
         auto* master = skin->skinPartition.get();
-        out->partitions = master->numPartitions;
-        out->vertices = master->vertexCount;
+        out->partitions = master->numPartitions; out->vertices = master->vertexCount;
         if (out->partitions != 1) { out->status = "unsupported-multiple-partitions"; return; }
         auto& part = master->partitions[0];
-        out->partitionVertices = part.vertices;
-        out->triangles = part.triangles;
-        out->boneCount = part.numBones;
+        out->partitionVertices = part.vertices; out->triangles = part.triangles; out->boneCount = part.numBones;
         if (!out->vertices || out->vertices > 65535 || part.vertices != out->vertices) {
             out->status = "unsupported-partition-index-domain"; return;
         }
@@ -75,8 +71,7 @@ void Probe(RE::BSGeometry* geometry, View* out) noexcept
         if (!buffer->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX)) {
             out->status = "unsupported-dynamic-position-stream"; return;
         }
-        // Position is at byte zero for this packed stream. VA_POSITION's nibble
-        // stores stride, so GetAttributeOffset(VA_POSITION) is NOT an offset.
+        // VA_POSITION's nibble encodes stride; the position itself starts at 0.
         out->positionSpan = out->stride;
         for (unsigned i = 1; i < 10; ++i) {
             if (((out->descriptor >> 44) & (1ULL << i)) == 0) continue;
@@ -94,9 +89,7 @@ void Probe(RE::BSGeometry* geometry, View* out) noexcept
         if (static_cast<std::uint64_t>(out->vertices) * out->stride != out->bufferBytes) {
             out->status = "buffer-capacity-mismatch"; return;
         }
-        out->vertexData = buffer->rawVertexData;
-        out->indices = part.triList;
-        out->vertexMap = part.vertexMap;
+        out->vertexData = buffer->rawVertexData; out->indices = part.triList; out->vertexMap = part.vertexMap;
         out->status = "readable";
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         out->fault = GetExceptionCode(); out->status = "metadata-access-fault";
@@ -130,16 +123,58 @@ Json MorphValues(RE::Actor* actor)
     });
     return visitor.values;
 }
-bool Enabled()
+struct Options { bool enabled{false}; std::string reference; };
+Options ReadOptions()
 {
-    // Small config read only; no BodySlide walk, NIF load, or TRI parse here.
     try {
         std::ifstream stream("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");
-        if (!stream) return false;
+        if (!stream) return {};
         const auto config = Json::parse(stream);
-        return config.value("exportFootGeometry", false);
-    } catch (...) { return false; }
+        return {config.value("exportFootGeometry", false), config.value("referenceBodyTri", std::string{})};
+    } catch (...) { return {}; }
 }
+
+// Bare skin can arrive in a RaceMenu attachment while objects[7] lacks a full
+// ARMO/ARMA/clone tuple. Retain the event, but never trust it without checking
+// that the exact Feet geometry is in the CURRENT player graph or active biped.
+struct Observation {
+    RE::NiPointer<RE::NiAVObject> root;
+    RE::FormID armor{}, addon{};
+    std::uint64_t sequence{};
+};
+std::mutex g_observationMutex;
+Observation g_observation;
+std::uint64_t g_observationSequence{};
+bool g_observerRegistered{false};
+class FootAttachmentObserver final : public IAddonAttachmentInterface {
+public:
+    void OnAttach(TESObjectREFR* refr, TESObjectARMO* armor, TESObjectARMA* addon,
+                  NiAVObject* object, bool firstPerson, NiNode*, NiNode*) override {
+        if (firstPerson || !refr || !object || !armor || !addon) return;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || reinterpret_cast<RE::TESObjectREFR*>(refr) != player) return;
+        auto* actualAddon = reinterpret_cast<RE::TESObjectARMA*>(addon);
+        if (!actualAddon->HasPartOf(RE::BGSBipedObjectForm::BipedObjectSlot::kFeet)) return;
+        {
+            std::scoped_lock lock(g_observationMutex);
+            g_observation = {RE::NiPointer<RE::NiAVObject>(reinterpret_cast<RE::NiAVObject*>(object)),
+                reinterpret_cast<RE::TESObjectARMO*>(armor)->GetFormID(), actualAddon->GetFormID(), ++g_observationSequence};
+        }
+        RequestCapture();
+    }
+};
+FootAttachmentObserver g_footObserver;
+bool ContainsObject(RE::NiAVObject* root, RE::NiAVObject* wanted)
+{
+    if (!root || !wanted) return false;
+    bool found = false;
+    RE::BSVisit::TraverseScenegraphObjects(root, [&](RE::NiAVObject* node) {
+        if (node == wanted) { found = true; return RE::BSVisit::BSVisitControl::kStop; }
+        return RE::BSVisit::BSVisitControl::kContinue;
+    });
+    return found;
+}
+
 struct WriteJob { std::string key; Json document; };
 class Writer {
     std::mutex mutex;
@@ -147,7 +182,9 @@ class Writer {
     std::deque<WriteJob> jobs;
     std::unordered_set<std::string> pending, done;
     std::jthread worker;
-    bool Write(const WriteJob& job) {
+    bool Write(WriteJob& job) {
+        // All TRI file I/O and parsing occurs here, not on the render/game task.
+        foot_basis_io::Enrich(job.document);
         const auto path = std::filesystem::path(kDirectory) / ("foot-" + job.key + ".json");
         const auto temp = std::filesystem::path(path.wstring() + L".tmp");
         std::error_code ec;
@@ -156,13 +193,10 @@ class Writer {
         {
             std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
             if (!stream) throw std::runtime_error("cannot create snapshot temp file");
-            stream << job.document.dump(2) << '\n';
-            stream.flush();
+            stream << job.document.dump(2) << '\n'; stream.flush();
             if (!stream) throw std::runtime_error("cannot flush snapshot temp file");
-            stream.close();
-            if (stream.fail()) throw std::runtime_error("cannot close snapshot temp file");
+            stream.close(); if (stream.fail()) throw std::runtime_error("cannot close snapshot temp file");
         }
-        // Never delete the existing final file before replacement.
         if (!::MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error(std::format("atomic replace failed: {}", ::GetLastError()));
         logger::info("[foot snapshot] wrote '{}' status={} (diagnostic-only)", path.string(), job.document.at("extraction").at("status").get<std::string>());
@@ -182,8 +216,7 @@ class Writer {
             catch (const std::exception& e) { logger::warn("[foot snapshot] write failed: {}", e.what()); }
             catch (...) { logger::warn("[foot snapshot] write failed"); }
             {
-                std::scoped_lock lock(mutex);
-                pending.erase(job.key);
+                std::scoped_lock lock(mutex); pending.erase(job.key);
                 if (success) done.insert(job.key);
             }
         }
@@ -203,100 +236,139 @@ Writer& GetWriter() { static Writer writer; return writer; }
 void Capture()
 {
     std::unique_lock captureLock(g_captureMutex, std::try_to_lock);
-    if (!captureLock.owns_lock() || !Enabled()) return;
-    if (REL::Module::get().version() != REL::Version{1, 6, 1170, 0}) return;
+    if (!captureLock.owns_lock()) return;
+    const auto options = ReadOptions();
+    if (!options.enabled || REL::Module::get().version() != REL::Version{1, 6, 1170, 0}) return;
     auto* player = RE::PlayerCharacter::GetSingleton();
     auto* base = player ? player->GetActorBase() : nullptr;
     if (!base) return;
     const auto& biped = player->GetBiped(false);
-    if (!biped) return;
-    const auto& part = biped->objects[37 - 30];
-    RE::NiPointer<RE::NiAVObject> root = part.partClone;
-    if (!root || !part.item || !part.addon) return;
-    const auto armor = Stable(part.item), addon = Stable(part.addon);
-    if (armor.empty() || addon.empty()) return;
-    const auto sex = base->GetSex();
-    const unsigned sexIndex = sex == RE::SEX::kFemale ? 1u : 0u;
-    const char* model = part.addon->bipedModels[sexIndex].GetModel();
-    const auto modelPath = std::string(model ? model : "");
-    Json triPaths = Json::array();
-    RE::BSVisit::TraverseScenegraphObjects(root.get(), [&](RE::NiAVObject* node) {
-        if (auto* extra = node->GetExtraData<RE::NiStringExtraData>("BODYTRI"); extra && extra->value && *extra->value)
-            triPaths.push_back(std::string(extra->value));
-        return RE::BSVisit::BSVisitControl::kContinue;
-    });
+    auto* scene = player->Get3D(false);
+    if (!biped || !scene) return;
+    const auto& active = biped->objects[37 - 30];
+    Observation observed;
+    { std::scoped_lock lock(g_observationMutex); observed = g_observation; }
+    std::vector<RE::NiPointer<RE::NiAVObject>> liveRoots;
+    for (unsigned i = 0; i < static_cast<unsigned>(RE::BIPED_OBJECTS::kTotal); ++i)
+        if (biped->objects[i].partClone) liveRoots.push_back(biped->objects[i].partClone);
+    struct Candidate { RE::NiPointer<RE::NiAVObject> root; RE::FormID armor{}, addon{}; bool observed{}; };
+    std::vector<Candidate> candidates;
+    if (observed.root) candidates.push_back({observed.root, observed.armor, observed.addon, true});
+    if (active.partClone && active.item && active.addon)
+        candidates.push_back({active.partClone, active.item->GetFormID(), active.addon->GetFormID(), false});
+    std::unordered_set<RE::BSGeometry*> captured;
     const auto morphs = MorphValues(player);
     const auto morphHash = std::format("{:016x}", core::HashText(morphs.dump()));
-    RE::BSVisit::TraverseScenegraphGeometries(root.get(), [&](RE::BSGeometry* geometry) {
-        if (!geometry || std::string_view(geometry->name.c_str()) != "Feet") return RE::BSVisit::BSVisitControl::kContinue;
-        View view{}; Probe(geometry, &view);
-        core::Result decoded; decoded.status = view.status;
-        std::string mapKind = view.vertexMap ? "not-validated" : "absent-single-full-partition";
-        if (decoded.status == "readable") {
-            std::vector<std::uint8_t> bytes(static_cast<std::size_t>(view.vertices) * view.stride);
-            std::vector<std::uint16_t> indices(static_cast<std::size_t>(view.triangles) * 3);
-            bool mappingOK = true;
-            if (view.vertexMap) {
-                std::vector<std::uint16_t> map(view.vertices);
-                mappingOK = CopyBytes(map.data(), view.vertexMap, map.size() * sizeof(std::uint16_t));
-                if (mappingOK) for (std::size_t i = 0; i < map.size(); ++i) if (map[i] != i) { mappingOK = false; break; }
-                mapKind = mappingOK ? "identity" : "unsupported-nonidentity-or-unreadable";
+    const unsigned sexIndex = base->GetSex() == RE::SEX::kFemale ? 1u : 0u;
+    for (const auto& candidate : candidates) {
+        auto* armorForm = RE::TESForm::LookupByID(candidate.armor);
+        auto* addonForm = RE::TESForm::LookupByID<RE::TESObjectARMA>(candidate.addon);
+        if (!armorForm || !addonForm) continue;
+        const auto armor = Stable(armorForm), addon = Stable(addonForm);
+        const char* model = addonForm->bipedModels[sexIndex].GetModel();
+        const std::string modelPath = model ? model : "";
+        Json triPaths = Json::array();
+        RE::BSVisit::TraverseScenegraphObjects(candidate.root.get(), [&](RE::NiAVObject* node) {
+            if (auto* extra = node->GetExtraData<RE::NiStringExtraData>("BODYTRI"); extra && extra->value && *extra->value)
+                triPaths.push_back(std::string(extra->value));
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+        RE::BSVisit::TraverseScenegraphGeometries(candidate.root.get(), [&](RE::BSGeometry* geometry) {
+            if (!geometry || std::string_view(geometry->name.c_str()) != "Feet" || captured.contains(geometry))
+                return RE::BSVisit::BSVisitControl::kContinue;
+            bool live = !candidate.observed || ContainsObject(scene, geometry);
+            if (!live) for (const auto& root : liveRoots) if (ContainsObject(root.get(), geometry)) { live = true; break; }
+            if (!live) return RE::BSVisit::BSVisitControl::kContinue;
+            captured.insert(geometry);
+            View view{}; Probe(geometry, &view);
+            core::Result decoded; decoded.status = view.status;
+            std::string mapKind = view.vertexMap ? "not-validated" : "absent-single-full-partition";
+            if (decoded.status == "readable") {
+                std::vector<std::uint8_t> bytes(static_cast<std::size_t>(view.vertices) * view.stride);
+                std::vector<std::uint16_t> indices(static_cast<std::size_t>(view.triangles) * 3);
+                bool mappingOK = true;
+                if (view.vertexMap) {
+                    std::vector<std::uint16_t> map(view.vertices);
+                    mappingOK = CopyBytes(map.data(), view.vertexMap, map.size() * sizeof(std::uint16_t));
+                    if (mappingOK) for (std::size_t i = 0; i < map.size(); ++i) if (map[i] != i) { mappingOK = false; break; }
+                    mapKind = mappingOK ? "identity" : "unsupported-nonidentity-or-unreadable";
+                }
+                if (!mappingOK) decoded.status = "unsupported-vertex-map";
+                else if (!CopyBytes(bytes.data(), view.vertexData, bytes.size()) ||
+                         !CopyBytes(indices.data(), view.indices, indices.size() * sizeof(std::uint16_t))) decoded.status = "cpu-buffer-copy-fault";
+                else decoded = core::Decode(bytes, indices, view.vertices, view.stride, view.componentBytes);
             }
-            if (!mappingOK) decoded.status = "unsupported-vertex-map";
-            else if (!CopyBytes(bytes.data(), view.vertexData, bytes.size()) ||
-                     !CopyBytes(indices.data(), view.indices, indices.size() * sizeof(std::uint16_t))) decoded.status = "cpu-buffer-copy-fault";
-            else decoded = core::Decode(bytes, indices, view.vertices, view.stride, view.componentBytes);
-        }
-        Json extraction = {{"status", decoded.status}, {"shapeReportedVertexCount", view.shapeVertices},
-            {"shapeReportedTriangleCount", view.shapeTriangles}, {"skinPartitionCount", view.partitions},
-            {"skinPartitionVertexCount", view.vertices}, {"partitionLocalVertexCount", view.partitionVertices},
-            {"partitionTriangleCount", view.triangles}, {"partitionBoneCount", view.boneCount},
-            {"vertexDescriptor", std::format("{:016x}", view.descriptor)}, {"strideBytes", view.stride},
-            {"positionSpanBytes", view.positionSpan}, {"componentBytes", view.componentBytes},
-            {"gpuAllocationBytes", view.bufferBytes}, {"vertexMap", mapKind}, {"accessFault", view.fault},
-            {"positionSource", "skin-partition.buffData.rawVertexData"}, {"indexSource", "skin-partition.triList"}};
-        // Do not dereference skin/skinData again outside the guarded probe.
-        const Json bind = view.bindAvailable ? Transform(view.bindTransform) : Json(nullptr);
-        Json document = {{"schema", 1}, {"generatorVersion", "0.9.0"},
-            {"source", "active-biped-foot-snapshot"}, {"status", "diagnostic-only"},
-            {"identity", {{"armor", armor}, {"addon", addon}, {"armaModel", modelPath},
-                {"bodyTriPaths", triPaths}, {"slot", 37}, {"buffered", false}, {"sexIndex", sexIndex},
-                {"actorWeight", base->GetWeight()}, {"race", Stable(player->GetRace())}}},
-            {"geometry", "Feet"}, {"coordinateSpace", "CPU vertex stream before bone transforms; NOT certified neutral"},
-            {"localTransform", Transform(geometry->local)}, {"rootParentToSkin", bind},
-            {"actorMorphValues", morphs}, {"actorMorphStateHash", morphHash},
-            {"extraction", std::move(extraction)},
-            {"geometryFit", {{"status", "not-run"}, {"posture", nullptr}, {"fitResidual", nullptr}}},
-            {"hashAlgorithm", "FNV1a64 diagnostic fingerprint, ordered little-endian u32; not a security hash"},
-            {"topologyFingerprint", nullptr}, {"positionFingerprint", nullptr},
-            {"positions", Json::array()}, {"triangles", Json::array()}};
-        if (decoded.Complete()) {
-            document["topologyFingerprint"] = std::format("{:016x}", decoded.topologyHash);
-            document["positionFingerprint"] = std::format("{:016x}", decoded.positionHash);
-            document["positions"] = decoded.positions;
-            document["triangles"] = decoded.triangles;
-        }
-        const std::string keySource = document["identity"].dump() + "|" + morphHash + "|" +
-            std::to_string(decoded.topologyHash) + "|" + std::to_string(decoded.positionHash) + "|" +
-            decoded.status + "|" + bind.dump() + "|" + document["localTransform"].dump();
-        const auto key = std::format("{:016x}", core::HashText(keySource));
-        document["captureKey"] = key;
-        logger::info("[foot snapshot] armor='{}' addon='{}' status={} decodedVertices={} decodedTriangles={} map={}",
-            armor, addon, decoded.status, decoded.positions.size(), decoded.triangles.size(), mapKind);
-        GetWriter().Submit({key, std::move(document)});
-        return RE::BSVisit::BSVisitControl::kContinue;
-    });
+            Json extraction = {{"status", decoded.status}, {"shapeReportedVertexCount", view.shapeVertices},
+                {"shapeReportedTriangleCount", view.shapeTriangles}, {"skinPartitionCount", view.partitions},
+                {"skinPartitionVertexCount", view.vertices}, {"partitionLocalVertexCount", view.partitionVertices},
+                {"partitionTriangleCount", view.triangles}, {"partitionBoneCount", view.boneCount},
+                {"vertexDescriptor", std::format("{:016x}", view.descriptor)}, {"strideBytes", view.stride},
+                {"positionSpanBytes", view.positionSpan}, {"componentBytes", view.componentBytes},
+                {"gpuAllocationBytes", view.bufferBytes}, {"vertexMap", mapKind}, {"accessFault", view.fault},
+                {"positionSource", "skin-partition.buffData.rawVertexData"}, {"indexSource", "skin-partition.triList"}};
+            const Json bind = view.bindAvailable ? Transform(view.bindTransform) : Json(nullptr);
+            Json document = {{"schema", 2}, {"generatorVersion", "0.10.0"},
+                {"source", candidate.observed ? "render-confirmed-attachment-foot-snapshot" : "active-biped-foot-snapshot"},
+                {"status", "diagnostic-only"},
+                {"identity", {{"armor", armor}, {"addon", addon}, {"armaModel", modelPath},
+                    {"bodyTriPaths", triPaths}, {"slot", 37}, {"buffered", false}, {"sexIndex", sexIndex},
+                    {"actorWeight", base->GetWeight()}, {"race", Stable(player->GetRace())}}},
+                {"captureSelection", {{"observedAttachment", candidate.observed}, {"currentGraphConfirmed", live},
+                    {"activeSlotHasClone", static_cast<bool>(active.partClone)}, {"activeSlotHasItem", active.item != nullptr},
+                    {"activeSlotHasAddon", active.addon != nullptr}}},
+                {"requestedReferenceBodyTri", options.reference},
+                {"geometry", "Feet"}, {"coordinateSpace", "CPU vertex stream before bone transforms; NOT certified neutral"},
+                {"localTransform", Transform(geometry->local)}, {"rootParentToSkin", bind},
+                {"actorMorphValues", morphs}, {"actorMorphStateHash", morphHash}, {"extraction", std::move(extraction)},
+                {"geometryFit", {{"status", "not-run"}, {"posture", nullptr}, {"fitResidual", nullptr}}},
+                {"hashAlgorithm", "FNV1a64 diagnostic fingerprint, ordered little-endian u32; not a security hash"},
+                {"topologyFingerprint", nullptr}, {"positionFingerprint", nullptr},
+                {"positions", Json::array()}, {"triangles", Json::array()}};
+            if (decoded.Complete()) {
+                document["topologyFingerprint"] = std::format("{:016x}", decoded.topologyHash);
+                document["positionFingerprint"] = std::format("{:016x}", decoded.positionHash);
+                document["positions"] = decoded.positions; document["triangles"] = decoded.triangles;
+            }
+            const auto keySource = std::string("0.10.0|") + document["identity"].dump() + "|" + morphHash + "|" +
+                std::to_string(decoded.topologyHash) + "|" + std::to_string(decoded.positionHash) + "|" +
+                decoded.status + "|" + bind.dump() + "|" + document["localTransform"].dump() + "|" + options.reference;
+            const auto key = std::format("{:016x}", core::HashText(keySource)); document["captureKey"] = key;
+            logger::info("[foot snapshot] armor='{}' addon='{}' status={} decodedVertices={} decodedTriangles={} map={} selection={}",
+                armor, addon, decoded.status, decoded.positions.size(), decoded.triangles.size(), mapKind,
+                candidate.observed ? "live-attachment" : "active-biped");
+            GetWriter().Submit({key, std::move(document)});
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+    }
+    if (captured.empty()) logger::info("[foot snapshot] selection=none activeClone={} activeItem={} activeAddon={} observedSequence={}; no unverified node exported",
+        static_cast<bool>(active.partClone), active.item != nullptr, active.addon != nullptr, observed.sequence);
 }
 } // namespace
-void SetMorphInterface(IBodyMorphInterface* a_interface) { g_morph = a_interface; }
+void SetMorphInterface(IBodyMorphInterface* value)
+{
+    g_morph = value;
+    if (g_observerRegistered) return;
+    auto* messaging = SKSE::GetMessagingInterface();
+    if (!messaging) return;
+    InterfaceExchangeMessage exchange{};
+    if (!messaging->Dispatch(InterfaceExchangeMessage::kMessage_ExchangeInterface, &exchange, sizeof(exchange), "SKEE") || !exchange.interfaceMap) return;
+    auto* updates = static_cast<IActorUpdateManager*>(exchange.interfaceMap->QueryInterface("ActorUpdateManager"));
+    if (!updates) return;
+    updates->AddInterface(&g_footObserver); g_observerRegistered = true;
+    logger::info("[foot snapshot] registered render-confirmed slot37 attachment observer");
+}
 void RequestCapture()
 {
     if (g_queued.exchange(true)) return;
-    if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask([] {
+    auto execute = [] {
         g_queued.store(false);
         try { Capture(); }
         catch (const std::exception& e) { logger::warn("[foot snapshot] capture failed: {}", e.what()); }
         catch (...) { logger::warn("[foot snapshot] capture failed"); }
+    };
+    if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask([execute] {
+        if (auto* next = SKSE::GetTaskInterface()) next->AddTask(execute);
+        else g_queued.store(false);
     });
     else g_queued.store(false);
 }
