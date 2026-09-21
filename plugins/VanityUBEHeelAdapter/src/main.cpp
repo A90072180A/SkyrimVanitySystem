@@ -907,7 +907,8 @@ std::optional<bodyslide::PostureCandidate> ResolveBodySlideCandidate(
     return bodyslide::ResolvePosture(
         models,
         PlayerWeight(),
-        g_config.debugDiagnostics);
+        g_config.logBodySlideCandidates ||
+            g_config.debugDiagnostics);
 }
 
 void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)

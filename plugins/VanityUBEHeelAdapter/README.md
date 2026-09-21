@@ -230,3 +230,21 @@ Look for:
 `[bodyslide posture] index not ready; returning without blocking the game thread`,
 and finally
 `[bodyslide] asynchronous index ready in ...s`.
+
+
+## Phase 7.2: footwear resolver trace
+
+When `logBodySlideCandidates=true`, the footwear resolver now emits a
+one-time trace for each normalized visible footwear model. The trace records:
+
+- the original SVS model path and normalized model stem;
+- whether an exact SliderSet output-path match exists;
+- up to eight same-basename alternatives when the exact path misses;
+- every exact matching SliderSet's `NoHeel` and `HiHeelz_CBBE`
+  small/big values;
+- matching zeroed-preset entries and their `NoHeel` values;
+- the precise reason a set yields no posture candidate;
+- the final selected candidate, if any.
+
+This is diagnostic-only and does not relax the current confidence policy.
+Manual footwear profiles still win.

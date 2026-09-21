@@ -11,6 +11,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace vanity_ube_heel_adapter::bodyslide {
@@ -53,6 +54,7 @@ std::atomic_bool g_loggedIndexPending{false};
 std::jthread g_indexThread;
 std::unordered_map<std::string, std::vector<SliderSetRecord>> g_setsByModel;
 std::unordered_map<std::string, std::vector<PresetRecord>> g_presetsBySet;
+std::unordered_set<std::string> g_loggedTraceModels;
 
 std::string LowerCopy(std::string_view a_value)
 {
@@ -299,6 +301,96 @@ std::string NormalizeModelStem(std::string_view a_path)
     }
 
     return LowerCopy(value);
+}
+
+std::string_view Basename(std::string_view a_stem)
+{
+    const auto slash = a_stem.find_last_of("\\/");
+    return slash == std::string_view::npos
+        ? a_stem
+        : a_stem.substr(slash + 1);
+}
+
+std::string OptionalValueText(const std::optional<float>& a_value)
+{
+    return a_value.has_value()
+        ? std::format("{:.1f}", *a_value)
+        : "missing";
+}
+
+void TraceSliderSet(
+    const SliderSetRecord& a_set,
+    const float a_actorWeight)
+{
+    const auto presetIt =
+        g_presetsBySet.find(LowerCopy(a_set.setName));
+    const std::size_t presetCount =
+        presetIt == g_presetsBySet.end() ? 0 : presetIt->second.size();
+
+    logger::info(
+        "[bodyslide posture trace] exact set='{}' model='{}' "
+        "NoHeel(small={},big={}) HiHeelz_CBBE(small={},big={}) "
+        "zeroedPresetEntries={} actorWeight={:.1f} source='{}'",
+        a_set.setName,
+        a_set.modelStem,
+        OptionalValueText(a_set.noHeel.lowWeight),
+        OptionalValueText(a_set.noHeel.highWeight),
+        OptionalValueText(a_set.hiHeelz.lowWeight),
+        OptionalValueText(a_set.hiHeelz.highWeight),
+        presetCount,
+        a_actorWeight,
+        a_set.sourceFile);
+
+    if (presetIt == g_presetsBySet.end()) {
+        logger::info(
+            "[bodyslide posture trace] set='{}' zeroedPresetMatch=false",
+            a_set.setName);
+        return;
+    }
+
+    for (const auto& preset : presetIt->second) {
+        logger::info(
+            "[bodyslide posture trace] preset='{}' set='{}' "
+            "NoHeel(small={},big={}) complete={} source='{}'",
+            preset.presetName,
+            preset.setName,
+            OptionalValueText(preset.noHeel.lowWeight),
+            OptionalValueText(preset.noHeel.highWeight),
+            preset.noHeel.Complete(),
+            preset.sourceFile);
+    }
+}
+
+void TraceNearModelMatches(std::string_view a_stem)
+{
+    const auto basename = Basename(a_stem);
+    std::size_t count = 0;
+
+    for (const auto& [indexedStem, records] : g_setsByModel) {
+        if (Basename(indexedStem) != basename) {
+            continue;
+        }
+
+        for (const auto& record : records) {
+            logger::info(
+                "[bodyslide posture trace] same-basename candidate "
+                "requested='{}' indexed='{}' set='{}' source='{}'",
+                a_stem,
+                indexedStem,
+                record.setName,
+                record.sourceFile);
+            if (++count >= 8) {
+                return;
+            }
+        }
+    }
+
+    if (count == 0) {
+        logger::info(
+            "[bodyslide posture trace] no same-basename SliderSet candidate "
+            "for normalized='{}'",
+            a_stem);
+    }
 }
 
 SliderValues ParseSlider(
@@ -697,6 +789,7 @@ void Reset()
 
     g_setsByModel.clear();
     g_presetsBySet.clear();
+    g_loggedTraceModels.clear();
     g_loggedIndexPending.store(false);
     g_indexState.store(IndexState::kNotStarted, std::memory_order_release);
 }
@@ -767,22 +860,72 @@ std::optional<PostureCandidate> ResolvePosture(
 
     g_loggedIndexPending.store(false);
     std::optional<PostureCandidate> resolved;
+
     for (const auto& path : a_modelPaths) {
         const auto stem = NormalizeModelStem(path);
         if (stem.empty()) {
             continue;
         }
 
+        const bool trace =
+            a_diagnostics && g_loggedTraceModels.insert(stem).second;
+        if (trace) {
+            logger::info(
+                "[bodyslide posture trace] input='{}' normalized='{}'",
+                path,
+                stem);
+        }
+
         const auto it = g_setsByModel.find(stem);
         if (it == g_setsByModel.end()) {
+            if (trace) {
+                logger::info(
+                    "[bodyslide posture trace] normalized='{}' "
+                    "exactSliderSetMatch=false",
+                    stem);
+                TraceNearModelMatches(stem);
+            }
             continue;
         }
 
+        if (trace) {
+            logger::info(
+                "[bodyslide posture trace] normalized='{}' "
+                "exactSliderSetMatch=true matchingSets={}",
+                stem,
+                it->second.size());
+        }
+
+        bool anyCandidateForStem = false;
         for (const auto& set : it->second) {
+            if (trace) {
+                TraceSliderSet(set, a_actorWeight);
+            }
+
             const auto candidate =
                 CandidateFromSet(set, a_actorWeight, a_diagnostics);
             if (!candidate.has_value()) {
+                if (trace) {
+                    logger::info(
+                        "[bodyslide posture trace] set='{}' result=none "
+                        "reason=no-complete-NoHeel-source",
+                        set.setName);
+                }
                 continue;
+            }
+
+            anyCandidateForStem = true;
+            if (trace) {
+                logger::info(
+                    "[bodyslide posture trace] set='{}' result=candidate "
+                    "source={} posture={:.3f} confidence={} "
+                    "small={:.1f} big={:.1f}",
+                    set.setName,
+                    candidate->source,
+                    candidate->posture,
+                    candidate->highConfidence ? "high" : "low",
+                    candidate->lowWeightValue,
+                    candidate->highWeightValue);
             }
 
             if (!resolved.has_value()) {
@@ -808,6 +951,29 @@ std::optional<PostureCandidate> ResolvePosture(
                     candidate->posture);
                 return std::nullopt;
             }
+        }
+
+        if (trace && !anyCandidateForStem) {
+            logger::info(
+                "[bodyslide posture trace] normalized='{}' finalForStem=none",
+                stem);
+        }
+    }
+
+    if (a_diagnostics) {
+        if (resolved.has_value()) {
+            logger::info(
+                "[bodyslide posture trace] final result source={} set='{}' "
+                "posture={:.3f} confidence={}",
+                resolved->source,
+                resolved->setName,
+                resolved->posture,
+                resolved->highConfidence ? "high" : "low");
+        } else {
+            logger::info(
+                "[bodyslide posture trace] final result=none for "
+                "{} model path(s)",
+                a_modelPaths.size());
         }
     }
 
