@@ -10,6 +10,15 @@
   "exportFootGeometry": true,
   "exportStockingCalibration": true,
   "referenceBodyTri": "!UBE\\Feet\\femalefeet_tangent.tri",
+  "referenceFeetModels": [
+    "!UBE\\Feet\\femalefeet_tangent_0.nif",
+    "!UBE\\Feet\\femalefeet_tangent_1.nif"
+  ],
+  "calibrationDonorAddons": {
+    "[Caenarvon] Cosplay Basics.esp|00000D1A": [
+      "[Caenarvon] Cosplay Basics UBE patch.esp|0000093B"
+    ]
+  },
   "diagnosticFootMorphs": ["NoHeel", "HiHeelz_CBBE", "HiHeelz_CBBE_to_UBE"],
   "stockings": [
     "[Caenarvon] Cosplay Basics.esp|00000D1A"
