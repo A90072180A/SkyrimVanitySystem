@@ -57,7 +57,10 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.13.0")
+    set_version("0.14.0")
+    -- Must be defined before the plugin PCH includes Windows headers.
+    -- Standalone algorithm tests previously missed the DLL's min/max collision.
+    add_defines("NOMINMAX")
 
     add_deps("commonlibsse-ng")
     add_packages("nlohmann_json")

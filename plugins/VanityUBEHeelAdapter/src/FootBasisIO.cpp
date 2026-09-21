@@ -3,6 +3,7 @@
 #include "FootCapturePolicy.h"
 #include "SourceGeometryEvidence.h"
 #include "StockingSurfaceCalibration.h"
+#include "StockingClearanceDiagnostics.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -56,8 +57,7 @@ Json ReadBasis(const std::string& resource,const std::string& shape,const std::s
     if(cache.size()>=64)cache.clear();cache.insert_or_assign(key,Cached{size,modified,out});return out;
 }
 std::vector<std::string> MorphRequests(const Json&document){
-    // Heel is measured independently because the tested stocking inventory has
-    // this exact name. It is NOT assumed to be NoHeel's negative or an alias.
+    // Heel is measured independently; never assumed to be NoHeel's inverse.
     if(document.value("geometryRole",std::string{"foot"})=="stocking")return {"NoHeel","Heel"};
     std::vector<std::string> names{"NoHeel"};
     if(document.contains("requestedDiagnosticMorphs")&&document["requestedDiagnosticMorphs"].is_array())
@@ -70,7 +70,7 @@ std::vector<std::string> MorphRequests(const Json&document){
 }
 void Enrich(Json&document){
     source_geometry_evidence::Resolve(document);
-    document["generatorVersion"]="0.13.0";document["schema"]=5;
+    document["generatorVersion"]="0.14.0";document["schema"]=6;
     document["triMorphData"]=Json::array();document["nativeMorphMeasurements"]=Json::array();document["referenceMorphMeasurements"]=Json::array();
     document["referenceCalibration"]={{"status","not-calibrated"},{"posture",nullptr}};
     if(document.value("geometryRole",std::string{})=="rejected-calibration-source")return;
@@ -80,8 +80,6 @@ void Enrich(Json&document){
         document["nativeFootFit"]={{"status","stocking-source-not-confirmed"},{"automaticApplicationAllowed",false}};return;
     }
     const auto shape=source?e.at("sourceGeometryName").get<std::string>():document.value("geometry",std::string{"Feet"});
-    // Never invent a .tri name from a NIF basename. The recovered path must be
-    // an actual BODYTRI extra-data link of the uniquely matched source shape.
     const auto&resources=source?e.at("bodyTriPaths"):document.at("identity").at("bodyTriPaths");
     const auto morphs=MorphRequests(document);std::unordered_set<std::string> visited;
     for(const auto&entry:resources){
@@ -94,5 +92,6 @@ void Enrich(Json&document){
     if(!reference.empty())for(const auto&morph:morphs){auto result=ReadBasis(reference,"Feet",morph,65536u);if(morph=="NoHeel")document["referenceTriBasis"]=result;document["referenceMorphMeasurements"].push_back(std::move(result));}
     source_geometry_evidence::Measure(document,ReadBasis);
     stocking_surface_calibration::Process(document,ReadBasis);
+    stocking_clearance_diagnostics::Process(document);
 }
 } // namespace vanity_ube_heel_adapter::foot_basis_io
