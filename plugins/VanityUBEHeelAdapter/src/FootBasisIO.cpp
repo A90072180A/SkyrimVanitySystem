@@ -2,6 +2,7 @@
 #include "TriMorphCore.h"
 #include "FootCapturePolicy.h"
 #include "SourceGeometryEvidence.h"
+#include "StockingSurfaceCalibration.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -55,8 +56,10 @@ Json ReadBasis(const std::string& resource,const std::string& shape,const std::s
     if(cache.size()>=64)cache.clear();cache.insert_or_assign(key,Cached{size,modified,out});return out;
 }
 std::vector<std::string> MorphRequests(const Json&document){
+    // Heel is measured independently because the tested stocking inventory has
+    // this exact name. It is NOT assumed to be NoHeel's negative or an alias.
+    if(document.value("geometryRole",std::string{"foot"})=="stocking")return {"NoHeel","Heel"};
     std::vector<std::string> names{"NoHeel"};
-    if(document.value("geometryRole",std::string{"foot"})=="stocking")return names;
     if(document.contains("requestedDiagnosticMorphs")&&document["requestedDiagnosticMorphs"].is_array())
         for(const auto&entry:document["requestedDiagnosticMorphs"]){
             if(!entry.is_string()||names.size()>=4)continue;const auto value=entry.get<std::string>();
@@ -67,6 +70,7 @@ std::vector<std::string> MorphRequests(const Json&document){
 }
 void Enrich(Json&document){
     source_geometry_evidence::Resolve(document);
+    document["generatorVersion"]="0.13.0";document["schema"]=5;
     document["triMorphData"]=Json::array();document["nativeMorphMeasurements"]=Json::array();document["referenceMorphMeasurements"]=Json::array();
     document["referenceCalibration"]={{"status","not-calibrated"},{"posture",nullptr}};
     if(document.value("geometryRole",std::string{})=="rejected-calibration-source")return;
@@ -89,5 +93,6 @@ void Enrich(Json&document){
     const auto reference=document.value("requestedReferenceBodyTri",std::string{});
     if(!reference.empty())for(const auto&morph:morphs){auto result=ReadBasis(reference,"Feet",morph,65536u);if(morph=="NoHeel")document["referenceTriBasis"]=result;document["referenceMorphMeasurements"].push_back(std::move(result));}
     source_geometry_evidence::Measure(document,ReadBasis);
+    stocking_surface_calibration::Process(document,ReadBasis);
 }
 } // namespace vanity_ube_heel_adapter::foot_basis_io
