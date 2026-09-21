@@ -248,3 +248,28 @@ one-time trace for each normalized visible footwear model. The trace records:
 
 This is diagnostic-only and does not relax the current confidence policy.
 Manual footwear profiles still win.
+
+
+## Phase 8: runtime footwear geometry diagnostics and generated profiles
+
+The adapter now captures the actual third-person BipedAnim partClone used by a
+visible footwear visual. Matching prefers the SVS replacement ARMA and exact
+model/BODYTRI stem, then records every BSGeometry under that runtime part.
+
+For each geometry the diagnostic records the name, RTTI type, BSTriShape vertex
+and triangle counts when available, skin-partition counts, model-space bound and
+world-space bound. Geometry names that look foot-related are flagged as
+`footLikeName` for the next embedded-foot fitting phase.
+
+No geometry-derived posture is applied in this phase. The result is written to:
+
+`Data/SKSE/Plugins/VanityUBEHeelAdapter.generated.json`
+
+The generated file is intentionally separate from
+`VanityUBEHeelAdapter.json`. Manual configuration remains authoritative.
+Generated entries currently use `status: diagnostic-only`, `posture: null`,
+and include a `geometryFit` placeholder for the later UBE-foot least-squares
+solver.
+
+Set `geometryDiagnostics=false` to suppress runtime capture, or
+`writeGeneratedProfiles=false` to keep log-only diagnostics.

@@ -17,6 +17,24 @@ struct SceneBodyTriRecord {
     std::string nodeName;
 };
 
+struct GeometryDiagnosticRecord {
+    std::string name;
+    std::string rttiName;
+    std::uint32_t vertexCount{0};
+    std::uint32_t triangleCount{0};
+    bool hasSkin{false};
+    std::uint32_t skinPartitionCount{0};
+    std::uint32_t skinPartitionVertexCount{0};
+    float modelBoundCenterX{0.0F};
+    float modelBoundCenterY{0.0F};
+    float modelBoundCenterZ{0.0F};
+    float modelBoundRadius{0.0F};
+    float worldBoundCenterX{0.0F};
+    float worldBoundCenterY{0.0F};
+    float worldBoundCenterZ{0.0F};
+    float worldBoundRadius{0.0F};
+};
+
 struct BipedPartRecord {
     std::uint32_t slotIndex{0};
     std::uint32_t slotNumber{0};
@@ -27,6 +45,7 @@ struct BipedPartRecord {
     std::string rootName;
     std::vector<std::string> bodyTriPaths;
     std::vector<std::string> geometryNames;
+    std::vector<GeometryDiagnosticRecord> geometryDetails;
 };
 
 using AttachmentChangedCallback = void (*)();

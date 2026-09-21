@@ -14,6 +14,8 @@ using SkyrimVanitySystemAPI::VisualState001;
 
 constexpr auto kConfigPath =
     "Data/SKSE/Plugins/VanityUBEHeelAdapter.json"sv;
+constexpr auto kGeneratedProfilePath =
+    "Data/SKSE/Plugins/VanityUBEHeelAdapter.generated.json"sv;
 
 struct StockingMorphProfile {
     std::optional<RE::FormID> armorFormID;
@@ -32,6 +34,8 @@ struct ManualConfig {
     bool autoPostureFromBodySlide{true};
     bool allowSliderSetDefaultPosture{false};
     bool logBodySlideCandidates{true};
+    bool geometryDiagnostics{true};
+    bool writeGeneratedProfiles{true};
     bool debugDiagnostics{false};
 };
 
@@ -71,6 +75,7 @@ bool g_loggedUnavailable{false};
 bool g_equipSinkRegistered{false};
 ManualConfig g_config{};
 std::unordered_map<std::string, bool> g_noHeelCapabilityCache;
+std::unordered_set<std::string> g_generatedGeometryKeys;
 
 void QueueSnapshot();
 
@@ -375,6 +380,14 @@ bool LoadConfig()
             it != root.end() && it->is_boolean()) {
             g_config.logBodySlideCandidates = it->get<bool>();
         }
+        if (const auto it = root.find("geometryDiagnostics");
+            it != root.end() && it->is_boolean()) {
+            g_config.geometryDiagnostics = it->get<bool>();
+        }
+        if (const auto it = root.find("writeGeneratedProfiles");
+            it != root.end() && it->is_boolean()) {
+            g_config.writeGeneratedProfiles = it->get<bool>();
+        }
         if (const auto it = root.find("debugDiagnostics");
             it != root.end() && it->is_boolean()) {
             g_config.debugDiagnostics = it->get<bool>();
@@ -384,6 +397,7 @@ bool LoadConfig()
             "Loaded config: stockings={} heelProfiles={} morphProfiles={} "
             "applyMorph={} autoDetectStockings={} autoPostureFromBodySlide={} "
             "allowSliderSetDefaultPosture={} logBodySlideCandidates={} "
+            "geometryDiagnostics={} writeGeneratedProfiles={} "
             "debugDiagnostics={} path='{}'",
             g_config.stockings.size(),
             g_config.heelNoHeelByArmor.size(),
@@ -393,6 +407,8 @@ bool LoadConfig()
             g_config.autoPostureFromBodySlide,
             g_config.allowSliderSetDefaultPosture,
             g_config.logBodySlideCandidates,
+            g_config.geometryDiagnostics,
+            g_config.writeGeneratedProfiles,
             g_config.debugDiagnostics,
             kConfigPath);
         return true;
@@ -851,6 +867,339 @@ void LogRecentAttachments()
     }
 }
 
+
+std::string HexFormID(const RE::FormID a_formID)
+{
+    return std::format("{:08X}", a_formID);
+}
+
+bool FootLikeGeometryName(std::string_view a_name)
+{
+    return ContainsAnyToken(
+        a_name,
+        {"foot", "feet", "toe", "ankle", "sole", "body"});
+}
+
+std::string GeometryDiagnosticKey(const LogicalVisualItem& a_item)
+{
+    std::vector<std::string> stems;
+    for (const auto& geometry : a_item.geometries) {
+        const auto stem = NormalizeMeshStem(geometry.modelPath);
+        if (!stem.empty()) {
+            AppendUnique(stems, stem);
+        }
+    }
+    std::ranges::sort(stems);
+
+    std::string key = StableIdentifier(a_item.armorFormID);
+    for (const auto& stem : stems) {
+        key += "|";
+        key += stem;
+    }
+    return key;
+}
+
+std::optional<racemenu::BipedPartRecord> FindFootwearBipedPart(
+    const LogicalVisualItem& a_item)
+{
+    const auto parts = racemenu::ScanPlayerBipedParts();
+    std::optional<racemenu::BipedPartRecord> best;
+    int bestScore = -1;
+
+    for (const auto& part : parts) {
+        if (!part.partClone) {
+            continue;
+        }
+
+        int score = 0;
+        if (part.itemFormID == a_item.armorFormID) {
+            score += 4;
+        }
+
+        for (const auto& geometry : a_item.geometries) {
+            if (geometry.armorAddonFormID != 0 &&
+                geometry.armorAddonFormID == part.addonFormID) {
+                score += 5;
+            }
+
+            const auto modelStem =
+                NormalizeMeshStem(geometry.modelPath);
+            if (modelStem.empty()) {
+                continue;
+            }
+
+            for (const auto& bodyTri : part.bodyTriPaths) {
+                if (NormalizeMeshStem(bodyTri) == modelStem) {
+                    score += 8;
+                    break;
+                }
+            }
+        }
+
+        if (part.slotNumber == 37) {
+            score += 1;
+        }
+        if (!part.buffered) {
+            score += 1;
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = part;
+        }
+    }
+
+    if (bestScore <= 1) {
+        return std::nullopt;
+    }
+    return best;
+}
+
+nlohmann::json GeometryDetailJson(
+    const racemenu::GeometryDiagnosticRecord& a_geometry)
+{
+    return nlohmann::json{
+        {"name", a_geometry.name},
+        {"rtti", a_geometry.rttiName},
+        {"footLikeName", FootLikeGeometryName(a_geometry.name)},
+        {"vertexCount", a_geometry.vertexCount},
+        {"triangleCount", a_geometry.triangleCount},
+        {"hasSkin", a_geometry.hasSkin},
+        {"skinPartitionCount", a_geometry.skinPartitionCount},
+        {"skinPartitionVertexCount",
+         a_geometry.skinPartitionVertexCount},
+        {"modelBound",
+         {
+             {"center",
+              {a_geometry.modelBoundCenterX,
+               a_geometry.modelBoundCenterY,
+               a_geometry.modelBoundCenterZ}},
+             {"radius", a_geometry.modelBoundRadius}
+         }},
+        {"worldBound",
+         {
+             {"center",
+              {a_geometry.worldBoundCenterX,
+               a_geometry.worldBoundCenterY,
+               a_geometry.worldBoundCenterZ}},
+             {"radius", a_geometry.worldBoundRadius}
+         }}
+    };
+}
+
+bool WriteGeneratedProfileEntry(
+    const nlohmann::json& a_entry)
+{
+    const std::filesystem::path path{kGeneratedProfilePath};
+    const auto tempPath =
+        std::filesystem::path{std::string(kGeneratedProfilePath) + ".tmp"};
+
+    nlohmann::json root = {
+        {"schema", 1},
+        {"generator", "Vanity UBE Heel Adapter"},
+        {"entries", nlohmann::json::array()}
+    };
+
+    {
+        std::ifstream input(path);
+        if (input.is_open()) {
+            try {
+                input >> root;
+            } catch (const std::exception& exception) {
+                logger::warn(
+                    "[generated profile] ignoring unreadable existing '{}': {}",
+                    path.string(),
+                    exception.what());
+                root = {
+                    {"schema", 1},
+                    {"generator", "Vanity UBE Heel Adapter"},
+                    {"entries", nlohmann::json::array()}
+                };
+            }
+        }
+    }
+
+    root["schema"] = 1;
+    root["generator"] = "Vanity UBE Heel Adapter";
+    if (!root.contains("entries") || !root["entries"].is_array()) {
+        root["entries"] = nlohmann::json::array();
+    }
+
+    const auto key = a_entry.value("key", std::string{});
+    auto& entries = root["entries"];
+    for (auto it = entries.begin(); it != entries.end();) {
+        if (it->is_object() &&
+            it->value("key", std::string{}) == key) {
+            it = entries.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    entries.push_back(a_entry);
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    {
+        std::ofstream output(tempPath, std::ios::trunc);
+        if (!output.is_open()) {
+            logger::warn(
+                "[generated profile] failed to open '{}'",
+                tempPath.string());
+            return false;
+        }
+        output << root.dump(2) << '\n';
+        if (!output.good()) {
+            logger::warn(
+                "[generated profile] failed while writing '{}'",
+                tempPath.string());
+            return false;
+        }
+    }
+
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    std::filesystem::rename(tempPath, path, ec);
+    if (ec) {
+        logger::warn(
+            "[generated profile] failed to replace '{}': {}",
+            path.string(),
+            ec.message());
+        return false;
+    }
+    return true;
+}
+
+void CaptureFootwearGeometryDiagnostic(
+    const LogicalVisualItem& a_item,
+    const std::optional<float> a_manualPosture,
+    const std::optional<bodyslide::PostureCandidate>& a_bodySlideCandidate)
+{
+    if (!g_config.geometryDiagnostics &&
+        !g_config.writeGeneratedProfiles) {
+        return;
+    }
+
+    const auto key = GeometryDiagnosticKey(a_item);
+    if (key.empty() || g_generatedGeometryKeys.contains(key)) {
+        return;
+    }
+
+    const auto part = FindFootwearBipedPart(a_item);
+    if (!part.has_value()) {
+        logger::info(
+            "[geometry diagnostic] footwear ARMO={:08X} stable='{}' "
+            "bipedMatch=none; will retry on a later snapshot",
+            a_item.armorFormID,
+            StableIdentifier(a_item.armorFormID));
+        return;
+    }
+
+    nlohmann::json models = nlohmann::json::array();
+    for (const auto& geometry : a_item.geometries) {
+        models.push_back({
+            {"arma", HexFormID(geometry.armorAddonFormID)},
+            {"visualSlotMask", geometry.visualSlotMask},
+            {"model", geometry.modelPath},
+            {"normalizedStem", NormalizeMeshStem(geometry.modelPath)}
+        });
+    }
+
+    nlohmann::json bodyTris = nlohmann::json::array();
+    for (const auto& bodyTri : part->bodyTriPaths) {
+        bodyTris.push_back(bodyTri);
+    }
+
+    nlohmann::json geometryDetails = nlohmann::json::array();
+    for (const auto& geometry : part->geometryDetails) {
+        geometryDetails.push_back(GeometryDetailJson(geometry));
+        logger::info(
+            "[geometry diagnostic] ARMO={:08X} slot={} geom='{}' rtti='{}' "
+            "vertices={} triangles={} skin={} skinVerts={} "
+            "modelRadius={:.3f} worldRadius={:.3f} footLikeName={}",
+            a_item.armorFormID,
+            part->slotNumber,
+            geometry.name,
+            geometry.rttiName,
+            geometry.vertexCount,
+            geometry.triangleCount,
+            geometry.hasSkin,
+            geometry.skinPartitionVertexCount,
+            geometry.modelBoundRadius,
+            geometry.worldBoundRadius,
+            FootLikeGeometryName(geometry.name));
+    }
+
+    nlohmann::json entry = {
+        {"key", key},
+        {"armor", StableIdentifier(a_item.armorFormID)},
+        {"runtimeArmorFormID", HexFormID(a_item.armorFormID)},
+        {"models", std::move(models)},
+        {"source", "runtime-geometry-diagnostic"},
+        {"status", "diagnostic-only"},
+        {"posture", nullptr},
+        {"confidence", 0.0},
+        {"meshFingerprint", nullptr},
+        {"geometryFit",
+         {
+             {"status", "not-run"},
+             {"posture", nullptr},
+             {"confidence", 0.0},
+             {"fitResidual", nullptr}
+         }},
+        {"biped",
+         {
+             {"matched", true},
+             {"slot", part->slotNumber},
+             {"buffered", part->buffered},
+             {"itemFormID", HexFormID(part->itemFormID)},
+             {"addonFormID", HexFormID(part->addonFormID)},
+             {"rootName", part->rootName},
+             {"bodyTriPaths", std::move(bodyTris)},
+             {"geometries", std::move(geometryDetails)}
+         }}
+    };
+
+    if (a_manualPosture.has_value()) {
+        entry["evidence"]["manualOverridePosture"] =
+            *a_manualPosture;
+    }
+    if (a_bodySlideCandidate.has_value()) {
+        entry["evidence"]["bodySlide"] = {
+            {"source", a_bodySlideCandidate->source},
+            {"set", a_bodySlideCandidate->setName},
+            {"posture", a_bodySlideCandidate->posture},
+            {"confidence",
+             a_bodySlideCandidate->highConfidence ? "high" : "low"},
+            {"small", a_bodySlideCandidate->lowWeightValue},
+            {"big", a_bodySlideCandidate->highWeightValue}
+        };
+    }
+
+    logger::info(
+        "[geometry diagnostic] footwear ARMO={:08X} stable='{}' "
+        "bipedSlot={} addon={:08X} BODYTRIs={} geometries={}",
+        a_item.armorFormID,
+        StableIdentifier(a_item.armorFormID),
+        part->slotNumber,
+        part->addonFormID,
+        part->bodyTriPaths.size(),
+        part->geometryDetails.size());
+
+    if (g_config.writeGeneratedProfiles) {
+        if (WriteGeneratedProfileEntry(entry)) {
+            logger::info(
+                "[generated profile] wrote footwear diagnostic key='{}' path='{}'",
+                key,
+                kGeneratedProfilePath);
+        } else {
+            return;
+        }
+    }
+
+    g_generatedGeometryKeys.insert(key);
+}
+
 bool IsFootwearVisual(const LogicalVisualItem& a_item)
 {
     constexpr std::uint64_t kFeetSlot = 1ULL << (37 - 30);
@@ -973,6 +1322,15 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
                 autoCandidate->highWeightValue,
                 autoCandidate->highConfidence ? "high" : "low",
                 hasManual);
+        }
+
+        if (IsFootwearVisual(item)) {
+            CaptureFootwearGeometryDiagnostic(
+                item,
+                hasManual
+                    ? std::optional<float>(manual->second)
+                    : std::nullopt,
+                autoCandidate);
         }
 
         if (hasManual) {
@@ -1369,6 +1727,7 @@ void HandleSKSEMessage(SKSE::MessagingInterface::Message* a_message)
 
     case SKSE::MessagingInterface::kDataLoaded:
         LoadConfig();
+        g_generatedGeometryKeys.clear();
         bodyslide::Reset();
         bodyslide::PrepareAsync(
             g_config.debugDiagnostics,

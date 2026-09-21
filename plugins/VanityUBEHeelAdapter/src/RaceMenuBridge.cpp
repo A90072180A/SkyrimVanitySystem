@@ -277,11 +277,51 @@ std::vector<BipedPartRecord> ScanPlayerBipedParts()
             RE::BSVisit::TraverseScenegraphGeometries(
                 root,
                 [&](RE::BSGeometry* a_geometry) {
-                    if (a_geometry) {
-                        appendUniqueString(
-                            record.geometryNames,
-                            std::string(a_geometry->name.c_str()));
+                    if (!a_geometry) {
+                        return RE::BSVisit::BSVisitControl::kContinue;
                     }
+
+                    GeometryDiagnosticRecord detail;
+                    detail.name = a_geometry->name.c_str();
+                    appendUniqueString(record.geometryNames, detail.name);
+
+                    if (const auto* rtti = a_geometry->GetRTTI()) {
+                        detail.rttiName = rtti->GetName();
+                    }
+
+                    if (auto* tri = a_geometry->AsTriShape()) {
+                        detail.vertexCount = tri->vertexCount;
+                        detail.triangleCount = tri->triangleCount;
+                    }
+
+                    auto& runtime = a_geometry->GetGeometryRuntimeData();
+                    if (auto* skin = runtime.skinInstance.get()) {
+                        detail.hasSkin = true;
+                        if (auto* partition = skin->skinPartition.get()) {
+                            detail.skinPartitionCount =
+                                partition->numPartitions;
+                            detail.skinPartitionVertexCount =
+                                partition->vertexCount;
+                        }
+                    }
+
+                    const auto& modelBound =
+                        a_geometry->GetModelData().modelBound;
+                    detail.modelBoundCenterX = modelBound.center.x;
+                    detail.modelBoundCenterY = modelBound.center.y;
+                    detail.modelBoundCenterZ = modelBound.center.z;
+                    detail.modelBoundRadius = modelBound.radius;
+
+                    detail.worldBoundCenterX =
+                        a_geometry->worldBound.center.x;
+                    detail.worldBoundCenterY =
+                        a_geometry->worldBound.center.y;
+                    detail.worldBoundCenterZ =
+                        a_geometry->worldBound.center.z;
+                    detail.worldBoundRadius =
+                        a_geometry->worldBound.radius;
+
+                    record.geometryDetails.push_back(std::move(detail));
                     return RE::BSVisit::BSVisitControl::kContinue;
                 });
         }
