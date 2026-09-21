@@ -1,6 +1,9 @@
 {
   "applyMorph": true,
   "autoDetectStockings": true,
+  "autoPostureFromBodySlide": true,
+  "allowSliderSetDefaultPosture": false,
+  "logBodySlideCandidates": true,
   "debugDiagnostics": false,
   "stockings": [
     "[Caenarvon] Cosplay Basics.esp|00000D1A"

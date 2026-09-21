@@ -180,3 +180,33 @@ are independently known and tested.
 Capability checks are cached by BODYTRI path for the session and cleared when
 the adapter config reloads, so rebuilding a TRI and reloading a save can be
 tested without stale capability data.
+
+
+## Phase 7: BodySlide footwear posture resolver POC
+
+The adapter now builds a lazy index of the MO2-visible BodySlide files under
+`Data/CalienteTools/BodySlide/SliderSets` and
+`Data/CalienteTools/BodySlide/SliderPresets`.
+
+For each visible footwear visual it matches the exact SVS model path against a
+BodySlide `SliderSet` output path/file and looks for an explicit `NoHeel`
+value. Resolution priority is:
+
+1. manual `heels` config (authoritative);
+2. an exact matching `-Zeroed Sliders-` preset with both small and big
+   `NoHeel` values (high-confidence automatic posture);
+3. the SliderSet's own small/big `NoHeel` defaults (diagnostic by default).
+
+Small/big values are interpolated using the player's current Skyrim body weight
+and converted from BodySlide percent to the adapter's normalized posture
+`0..1`.
+
+`allowSliderSetDefaultPosture` defaults to `false`: SliderSet defaults are
+logged but not automatically trusted because an outfit may have been built with
+a different preset. `HiHeelz_CBBE` is detected for diagnostics only and is
+never converted into posture automatically.
+
+The bundled Converse manual profile remains in place, so this phase can compare
+the automatic BodySlide candidate against the known-good manual value without
+risking the validated stocking behavior. Look for
+`[footwear auto candidate]` in the log.

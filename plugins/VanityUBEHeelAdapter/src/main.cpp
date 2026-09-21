@@ -1,4 +1,5 @@
 #include "Plugin.h"
+#include "BodySlidePostureResolver.h"
 #include "RaceMenuBridge.h"
 #include "api/SkyrimVanitySystemAPI.h"
 
@@ -28,6 +29,9 @@ struct ManualConfig {
     std::vector<StockingMorphProfile> stockingMorphProfiles;
     bool applyMorph{true};
     bool autoDetectStockings{true};
+    bool autoPostureFromBodySlide{true};
+    bool allowSliderSetDefaultPosture{false};
+    bool logBodySlideCandidates{true};
     bool debugDiagnostics{false};
 };
 
@@ -250,6 +254,7 @@ bool LoadConfig()
 {
     g_config = {};
     g_noHeelCapabilityCache.clear();
+    bodyslide::Reset();
 
     std::ifstream stream(std::filesystem::path{kConfigPath});
     if (!stream.is_open()) {
@@ -359,6 +364,18 @@ bool LoadConfig()
             it != root.end() && it->is_boolean()) {
             g_config.autoDetectStockings = it->get<bool>();
         }
+        if (const auto it = root.find("autoPostureFromBodySlide");
+            it != root.end() && it->is_boolean()) {
+            g_config.autoPostureFromBodySlide = it->get<bool>();
+        }
+        if (const auto it = root.find("allowSliderSetDefaultPosture");
+            it != root.end() && it->is_boolean()) {
+            g_config.allowSliderSetDefaultPosture = it->get<bool>();
+        }
+        if (const auto it = root.find("logBodySlideCandidates");
+            it != root.end() && it->is_boolean()) {
+            g_config.logBodySlideCandidates = it->get<bool>();
+        }
         if (const auto it = root.find("debugDiagnostics");
             it != root.end() && it->is_boolean()) {
             g_config.debugDiagnostics = it->get<bool>();
@@ -366,12 +383,17 @@ bool LoadConfig()
 
         logger::info(
             "Loaded config: stockings={} heelProfiles={} morphProfiles={} "
-            "applyMorph={} autoDetectStockings={} debugDiagnostics={} path='{}'",
+            "applyMorph={} autoDetectStockings={} autoPostureFromBodySlide={} "
+            "allowSliderSetDefaultPosture={} logBodySlideCandidates={} "
+            "debugDiagnostics={} path='{}'",
             g_config.stockings.size(),
             g_config.heelNoHeelByArmor.size(),
             g_config.stockingMorphProfiles.size(),
             g_config.applyMorph,
             g_config.autoDetectStockings,
+            g_config.autoPostureFromBodySlide,
+            g_config.allowSliderSetDefaultPosture,
+            g_config.logBodySlideCandidates,
             g_config.debugDiagnostics,
             kConfigPath);
         return true;
@@ -830,10 +852,70 @@ void LogRecentAttachments()
     }
 }
 
+bool IsFootwearVisual(const LogicalVisualItem& a_item)
+{
+    constexpr std::uint64_t kFeetSlot = 1ULL << (37 - 30);
+
+    bool slot37 = false;
+    bool footwearToken = false;
+    for (const auto& geometry : a_item.geometries) {
+        slot37 = slot37 || ((geometry.visualSlotMask & kFeetSlot) != 0);
+        footwearToken = footwearToken || ContainsAnyToken(
+            geometry.modelPath,
+            {"shoe", "boot", "heel", "sandal", "sneaker",
+             "converse", "pump", "loafer", "footwear"});
+    }
+    return slot37 || footwearToken;
+}
+
+float PlayerWeight()
+{
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* base = player ? player->GetActorBase() : nullptr;
+    return base ? std::clamp(base->GetWeight(), 0.0F, 100.0F) : 50.0F;
+}
+
+struct FootwearResolution {
+    const LogicalVisualItem* item{nullptr};
+    float posture{0.0F};
+    std::string source;
+    int confidence{0};
+};
+
+std::optional<bodyslide::PostureCandidate> ResolveBodySlideCandidate(
+    const LogicalVisualItem& a_item)
+{
+    if (!g_config.autoPostureFromBodySlide &&
+        !g_config.logBodySlideCandidates) {
+        return std::nullopt;
+    }
+    if (!IsFootwearVisual(a_item)) {
+        return std::nullopt;
+    }
+
+    std::vector<std::string> models;
+    models.reserve(a_item.geometries.size());
+    for (const auto& geometry : a_item.geometries) {
+        if (!geometry.modelPath.empty()) {
+            models.push_back(geometry.modelPath);
+        }
+    }
+
+    if (models.empty()) {
+        return std::nullopt;
+    }
+
+    return bodyslide::ResolvePosture(
+        models,
+        PlayerWeight(),
+        g_config.debugDiagnostics);
+}
+
 void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
 {
     std::vector<const LogicalVisualItem*> stockings;
-    std::vector<std::pair<const LogicalVisualItem*, float>> footwear;
+    std::vector<FootwearResolution> footwear;
+    bool hasManualFootwear = false;
 
     for (const auto& item : a_items) {
         bool explicitStocking = false;
@@ -870,18 +952,83 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
             }
         }
 
-        if (const auto heel =
-                g_config.heelNoHeelByArmor.find(item.armorFormID);
-            heel != g_config.heelNoHeelByArmor.end()) {
-            footwear.emplace_back(std::addressof(item), heel->second);
+        const auto manual =
+            g_config.heelNoHeelByArmor.find(item.armorFormID);
+        const bool hasManual =
+            manual != g_config.heelNoHeelByArmor.end();
+
+        const auto autoCandidate = ResolveBodySlideCandidate(item);
+        if (autoCandidate.has_value() &&
+            g_config.logBodySlideCandidates) {
             logger::info(
-                "[footwear profile] ARMO={:08X} stable='{}' "
+                "[footwear auto candidate] ARMO={:08X} stable='{}' "
+                "source={} set='{}' posture={:.3f} small={:.1f} big={:.1f} "
+                "confidence={} manualOverride={}",
+                item.armorFormID,
+                StableIdentifier(item.armorFormID),
+                autoCandidate->source,
+                autoCandidate->setName,
+                autoCandidate->posture,
+                autoCandidate->smallValue,
+                autoCandidate->bigValue,
+                autoCandidate->highConfidence ? "high" : "low",
+                hasManual);
+        }
+
+        if (hasManual) {
+            hasManualFootwear = true;
+            footwear.push_back(FootwearResolution{
+                .item = std::addressof(item),
+                .posture = manual->second,
+                .source = "manual",
+                .confidence = 100});
+            logger::info(
+                "[footwear profile] ARMO={:08X} stable='{}' source=manual "
                 "requestedPosture={:.3f} geometries={}",
                 item.armorFormID,
                 StableIdentifier(item.armorFormID),
-                heel->second,
+                manual->second,
                 item.geometries.size());
+            continue;
         }
+
+        if (!g_config.autoPostureFromBodySlide ||
+            !autoCandidate.has_value()) {
+            continue;
+        }
+
+        const bool accepted =
+            autoCandidate->highConfidence ||
+            g_config.allowSliderSetDefaultPosture;
+        if (!accepted) {
+            logger::info(
+                "[footwear auto candidate] ARMO={:08X} rejected: "
+                "SliderSet default posture is low-confidence",
+                item.armorFormID);
+            continue;
+        }
+
+        footwear.push_back(FootwearResolution{
+            .item = std::addressof(item),
+            .posture = autoCandidate->posture,
+            .source = autoCandidate->source,
+            .confidence = autoCandidate->highConfidence ? 80 : 40});
+        logger::info(
+            "[footwear profile] ARMO={:08X} stable='{}' source={} "
+            "requestedPosture={:.3f} set='{}'",
+            item.armorFormID,
+            StableIdentifier(item.armorFormID),
+            autoCandidate->source,
+            autoCandidate->posture,
+            autoCandidate->setName);
+    }
+
+    if (hasManualFootwear) {
+        std::erase_if(
+            footwear,
+            [](const FootwearResolution& a_resolution) {
+                return a_resolution.source != "manual";
+            });
     }
 
     if (stockings.empty()) {
@@ -889,20 +1036,49 @@ void ResolveAndApply(const std::vector<LogicalVisualItem>& a_items)
         return;
     }
     if (footwear.empty()) {
-        logger::info("[heel plan] no configured footwear is currently visible");
-        return;
-    }
-    if (footwear.size() > 1) {
-        logger::warn(
-            "[heel plan] ambiguous: {} configured footwear items are visible; "
-            "no single target is resolved",
-            footwear.size());
+        logger::info(
+            "[heel plan] no resolved footwear posture is currently visible");
         return;
     }
 
+    std::ranges::sort(
+        footwear,
+        [](const FootwearResolution& a_left,
+           const FootwearResolution& a_right) {
+            if (a_left.confidence != a_right.confidence) {
+                return a_left.confidence > a_right.confidence;
+            }
+            return a_left.item->maxPriority > a_right.item->maxPriority;
+        });
+
+    const auto bestConfidence = footwear.front().confidence;
+    const auto bestPosture = footwear.front().posture;
+    for (std::size_t index = 1; index < footwear.size(); ++index) {
+        if (footwear[index].confidence != bestConfidence) {
+            break;
+        }
+        if (std::abs(footwear[index].posture - bestPosture) > 0.02F) {
+            logger::warn(
+                "[heel plan] ambiguous footwear posture: ARMO={:08X} {:.3f} "
+                "vs ARMO={:08X} {:.3f}",
+                footwear.front().item->armorFormID,
+                bestPosture,
+                footwear[index].item->armorFormID,
+                footwear[index].posture);
+            return;
+        }
+    }
+
     auto* player = RE::PlayerCharacter::GetSingleton();
-    const auto* shoe = footwear.front().first;
-    const auto requestedPosture = footwear.front().second;
+    const auto* shoe = footwear.front().item;
+    const auto requestedPosture = footwear.front().posture;
+    logger::info(
+        "[heel plan] resolved footwear ARMO={:08X} source={} "
+        "posture={:.3f} confidence={}",
+        shoe->armorFormID,
+        footwear.front().source,
+        requestedPosture,
+        footwear.front().confidence);
 
     for (const auto* stocking : stockings) {
         const auto match = FindAttachment(*stocking);
