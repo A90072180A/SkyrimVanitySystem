@@ -42,5 +42,6 @@
   "automaticHeight": true,
   "heightMaxNormalizedResidual": 0.15,
   "allowHeightEndpointApproximation": false,
-  "signedHeightOverrides": []
+  "signedHeightOverrides": [],
+  "barefootFlatFeet": true
 }

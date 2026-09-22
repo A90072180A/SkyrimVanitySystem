@@ -42,6 +42,10 @@ jobs:
           ./height-plan-tests
           python3 -m py_compile plugins/VanityUBEHeelAdapter/tools/replay_height.py
           g++ -std=c++20 -O2 -Wall -Wextra plugins/VanityUBEHeelAdapter/tools/replay_height.cpp -o replay-height
+      - name: Validate barefoot versus unknown-footwear policy
+        run: |
+          g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/BarefootPolicyTests.cpp -o barefoot-policy-tests
+          ./barefoot-policy-tests
   build:
     needs: core-tests
     runs-on: windows-2022
@@ -69,7 +73,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'MSVC installation not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests')
+          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests','BarefootPolicyTests')
           foreach ($test in $tests) {
             cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 /DNOMINMAX /FIWindows.h plugins\VanityUBEHeelAdapter\tests\$test.cpp /Fe:$test.exe && $test.exe"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -97,9 +101,10 @@ jobs:
           Copy-Item $dll 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll'
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
           Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE15-RELEASE.md' 'artifact/PHASE15-RELEASE.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/BAREFOOT-0.15.1.md' 'artifact/BAREFOOT-0.15.1.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
           @{
-            version = '0.15.0'
+            version = '0.15.1'
             commit = $env:GITHUB_SHA
             dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'
