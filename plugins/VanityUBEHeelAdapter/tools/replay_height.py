@@ -50,13 +50,13 @@ def main() -> None:
         if d.get("geometryRole") != "foot":
             continue
         name = d["identity"]["armor"]
-        if context(d) != context(anchor) or d["triangles"] != anchor["triangles"]:
+        if context(d) != context(anchor) :
             results.append({"armor": name, "status": "context-or-topology-rejected"})
             continue
         path = outdir / (hashlib.sha256(name.encode()).hexdigest()[:12] + ".bin")
         with path.open("wb") as f:
-            f.write(struct.pack("<I", 0x48544731))
-            arrays = [(anchor["positions"], "f"), (d["positions"], "f"), (anchor["triangles"], "I"),
+            f.write(struct.pack("<I", 0x48544732))
+            arrays = [(anchor["positions"], "f"), (d["positions"], "f"), (anchor["triangles"], "I"), (d["triangles"], "I"),
                       (stock, "f"), (deltas["NoHeel"], "f"), (deltas["Heel"], "f")]
             for values, kind in arrays:
                 assert 0 < len(values) <= 65535

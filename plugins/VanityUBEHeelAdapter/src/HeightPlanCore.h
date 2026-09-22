@@ -6,13 +6,15 @@
 namespace vanity_ube_heel_adapter::height_plan_core {
 namespace s = surface_posture_core;
 struct Controls { double noHeel{}, heel{}; };
-inline bool Valid(Controls c) {
-    return std::isfinite(c.noHeel) && std::isfinite(c.heel) &&
-        c.noHeel >= 0 && c.noHeel <= 1 && c.heel >= 0 && c.heel <= 1 &&
+inline constexpr double AbsoluteHeelLimit = 10.0;
+inline bool ValidHeelLimit(double v) { return std::isfinite(v) && v >= 1 && v <= AbsoluteHeelLimit; }
+inline bool Valid(Controls c, double heelMax=1.0) {
+    return ValidHeelLimit(heelMax) && std::isfinite(c.noHeel) && std::isfinite(c.heel) &&
+        c.noHeel >= 0 && c.noHeel <= 1 && c.heel >= 0 && c.heel <= heelMax &&
         !(c.noHeel > 0 && c.heel > 0);
 }
-inline std::optional<Controls> FromSigned(double value) {
-    if (!std::isfinite(value) || value < -1 || value > 1) return {};
+inline std::optional<Controls> FromSigned(double value, double heelMax=1.0) {
+    if (!ValidHeelLimit(heelMax) || !std::isfinite(value) || value < -heelMax || value > 1) return {};
     return value >= 0 ? Controls{value, 0} : Controls{0, -value};
 }
 struct Branch {
@@ -26,13 +28,13 @@ struct Result {
     bool saturated{};
     double rms{}, maximum{}, normalizedResidual{}, normalizationRms{};
 };
-inline Branch FitBranch(std::span<const s::Vec> desired, std::span<const s::Vec> delta) {
+inline Branch FitBranch(std::span<const s::Vec> desired, std::span<const s::Vec> delta, double maximum=1.0) {
     Branch out;
-    if(desired.empty()||desired.size()!=delta.size()||desired.size()>65535)return out;
+    if(!std::isfinite(maximum)||maximum<=0||maximum>AbsoluteHeelLimit||desired.empty()||desired.size()!=delta.size()||desired.size()>65535)return out;
     double den=0, num=0;
     for (std::size_t i=0;i<desired.size();++i) { den+=s::Norm2(delta[i]); num+=s::Dot(delta[i],desired[i]); }
     if (den <= 1e-18 || !std::isfinite(den) || !std::isfinite(num)) return out;
-    out.available=true; out.raw=num/den; out.bounded=std::clamp(out.raw,0.,1.);
+    out.available=true; out.raw=num/den; out.bounded=std::clamp(out.raw,0.,maximum);
     for (std::size_t i=0;i<desired.size();++i) {
         const double e=s::Norm2(s::Sub(desired[i],s::Mul(delta[i],out.bounded)));
         out.squaredError+=e; out.maximum=(std::max)(out.maximum,std::sqrt(e));
@@ -41,9 +43,9 @@ inline Branch FitBranch(std::span<const s::Vec> desired, std::span<const s::Vec>
     return out;
 }
 inline Result Solve(std::span<const s::Vec> desired, std::span<const s::Vec> noHeel,
-                    std::span<const s::Vec> heel) {
+                    std::span<const s::Vec> heel, double heelMax=1.0) {
     Result out;
-    if (desired.empty() || desired.size()>65535 || desired.size()!=noHeel.size() || desired.size()!=heel.size()) {
+    if (!ValidHeelLimit(heelMax) || desired.empty() || desired.size()>65535 || desired.size()!=noHeel.size() || desired.size()!=heel.size()) {
         out.status="invalid-height-input"; return out;
     }
     double normN=0,normH=0;
@@ -51,14 +53,14 @@ inline Result Solve(std::span<const s::Vec> desired, std::span<const s::Vec> noH
         if (!s::Finite(desired[i]) || !s::Finite(noHeel[i]) || !s::Finite(heel[i])) { out.status="nonfinite-height-input"; return out; }
         normN+=s::Norm2(noHeel[i]); normH+=s::Norm2(heel[i]);
     }
-    out.noHeel=FitBranch(desired,noHeel); out.heel=FitBranch(desired,heel);
+    out.noHeel=FitBranch(desired,noHeel); out.heel=FitBranch(desired,heel,heelMax);
     if (!out.noHeel.available && !out.heel.available) { out.status="no-usable-height-morph"; return out; }
     // Ties prefer NoHeel; this includes the shared origin and avoids jitter.
     const bool useHeel=out.heel.available && (!out.noHeel.available ||
         out.heel.squaredError+1e-12 < out.noHeel.squaredError);
     const auto& chosen=useHeel ? out.heel : out.noHeel;
     out.controls=useHeel ? Controls{0,chosen.bounded} : Controls{chosen.bounded,0};
-    out.saturated=chosen.raw>1.+1e-6;
+    out.saturated=chosen.raw>(useHeel ? heelMax : 1.0)+1e-6;
     out.rms=chosen.rms; out.maximum=chosen.maximum;
     // Preserve the preceding single-NoHeel policy's normalization when present.
     out.normalizationRms=std::sqrt((normN>1e-18?normN:normH)/double(desired.size()));
@@ -69,7 +71,7 @@ inline Result Solve(std::span<const s::Vec> desired, std::span<const s::Vec> noH
 inline Result FitSurface(const s::Map& map, std::span<const s::Point> anchor,
     std::span<const s::Triangle> at, std::span<const s::Point> target,
     std::span<const s::Triangle> tt, std::span<const s::Point> noHeel,
-    std::span<const s::Point> heel, double referenceNoHeel) {
+    std::span<const s::Point> heel, double referenceNoHeel, double heelMax=1.0) {
     Result bad;
     if (map.status!="mapped" || anchor.size()!=target.size() || at.size()!=tt.size() ||
         !std::equal(at.begin(),at.end(),tt.begin()) || !std::isfinite(referenceNoHeel) ||
@@ -91,12 +93,12 @@ inline Result FitSurface(const s::Map& map, std::span<const s::Point> anchor,
         const auto n=s::V(noHeel[m.donorIndex]),h=s::V(heel[m.donorIndex]);
         ns.push_back(n);hs.push_back(h);desired.push_back(s::Add(move,s::Mul(n,referenceNoHeel)));
     }
-    return Solve(desired,ns,hs);
+    return Solve(desired,ns,hs,heelMax);
 }
 inline std::string Decision(const Result& fit, double maximumResidual=.15,
-                            bool allowEndpointApproximation=false) {
+                            bool allowEndpointApproximation=false, double heelMax=1.0) {
     if (fit.status!="bounded-height-fit") return fit.status;
-    if (!Valid(fit.controls) || !std::isfinite(fit.normalizedResidual) ||
+    if (!Valid(fit.controls,heelMax) || !std::isfinite(fit.normalizedResidual) ||
         !std::isfinite(maximumResidual) || maximumResidual<0) return "invalid-height-policy";
     if (fit.normalizedResidual>maximumResidual) return "height-residual-too-large";
     if (fit.saturated && !allowEndpointApproximation) return "height-range-exceeded";

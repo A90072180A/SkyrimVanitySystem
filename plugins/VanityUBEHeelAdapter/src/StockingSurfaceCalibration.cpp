@@ -1,3 +1,5 @@
+#include "ConfigState.h"
+#include "TopologySubsetCore.h"
 #include "StockingSurfaceCalibration.h"
 #include "SurfacePostureCore.h"
 #include "HeightPlanCore.h"
@@ -28,12 +30,8 @@ struct Asset { nif::Result data; std::string fingerprint, resource; std::uintmax
 // never loaded as authority and never used by the runtime morph resolver.
 std::map<std::string, std::shared_ptr<const Asset>> assets;
 std::map<std::string, Json> results;
-Json Configuration() {
-    std::ifstream file("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");
-    if (!file) return Json::object();
-    auto config = Json::parse(file);
-    return config.is_object() ? config : Json::object();
-}
+Json Configuration() { return config_state::Get(); }
+
 std::shared_ptr<const Asset> ReadNif(const std::string& resource) {
     const auto key = foot_capture_policy::ResourceKey(resource);
     if (key.empty() || !key.ends_with(".nif")) return {};
@@ -187,7 +185,7 @@ bool ReconstructDonor(Sample& s, Json& d, const ReadMorph& readMorph, double ref
         difference[i]=surface::Sub(surface::V(s.positions[i]),baseline[i]);
         nd[i]=surface::V((*deltas)[i]);hd[i]=surface::V(heelValues[i]);
     }
-    const auto local=height_plan_core::Solve(difference,nd,hd);
+    const auto local=height_plan_core::Solve(difference,nd,hd,Configuration().value("heelMax",2.0));
     if(local.status!="bounded-height-fit")return finish("unresolved-local-height");
     const double q=local.controls.noHeel,hq=local.controls.heel;
     double sum2=0,active2=0,maxError=0;unsigned activeCount=0;
@@ -215,7 +213,7 @@ struct Context {
 std::map<std::string,Context> contexts;
 std::string PairID(const Sample& s) { return Json::array({s.identity.at("armor"),s.identity.at("addon"),s.identity.at("armaModel"),s.fingerprint}).dump(); }
 void Persist() {
-    Json out={{"schema",1},{"generatorVersion","0.15.0"},{"status","diagnostic-only"},
+    Json out={{"schema",1},{"generatorVersion","0.16.0"},{"status","diagnostic-only"},
               {"automaticApplicationAllowed",false},{"entries",Json::array()},
               {"semantics","reference-gap-preserving surface correspondence; no NoHeel/HiHeelz alias; no extrapolation applied"}};
     for(const auto& [key,result]:results)out["entries"].push_back(result);
@@ -230,15 +228,23 @@ void Persist() {
 void Evaluate(Context& group,double referenceValue) {
     if(!group.anchor)return;
     const auto& anchor=*group.anchor;
+    const auto cfg=Configuration();
+    const double heelMax=cfg.value("heelMax",2.0),residualMax=cfg.value("heightMaxNormalizedResidual",0.15);
+    const bool allowEndpoints=cfg.value("allowHeightEndpointApproximation",false);
     for(const auto& [donorID,donor]:group.donors) {
         if(!SameTransform(anchor.local,donor.local)||!SameTransform(anchor.skin,donor.skin))continue;
         auto selection=donor.delta;
         for(std::size_t i=0;i<selection.size();++i)if(surface::Norm2(surface::V(donor.heelDelta[i]))>surface::Norm2(surface::V(selection[i])))selection[i]=donor.heelDelta[i];
-        auto map=surface::BuildMap(anchor.positions,anchor.triangles,donor.positions,selection);
-        for(auto& m:map.entries)m.delta=surface::V(donor.delta[m.donorIndex]);
         for(const auto& [footID,target]:group.feet) {
             if(!SameTransform(anchor.local,target.local)||!SameTransform(anchor.skin,target.skin))continue;
-            const auto fit=surface::FitTarget(map,anchor.positions,anchor.triangles,target.positions,target.triangles,referenceValue);
+            auto aligned=topology_subset_core::Align(anchor.positions,anchor.triangles,target.positions,target.triangles);
+            if(!cfg.value("enableComponentSubset",true) && aligned.removedVertices)aligned={};
+            const auto& triangles=aligned.Complete()?aligned.commonTriangles:anchor.triangles;
+            const auto& targetPositions=aligned.Complete()?aligned.alignedTarget:target.positions;
+            const auto& targetTriangles=aligned.Complete()?aligned.commonTriangles:target.triangles;
+            auto map=surface::BuildMap(anchor.positions,triangles,donor.positions,selection);
+            for(auto& m:map.entries)m.delta=surface::V(donor.delta[m.donorIndex]);
+            const auto fit=surface::FitTarget(map,anchor.positions,triangles,targetPositions,targetTriangles,referenceValue);
             const auto recommendation=surface::Recommendation(fit);
             const auto key=std::format("{:016x}",foot_snapshot_core::HashText(donorID+footID+anchor.context+anchor.fingerprint));
             Json result={{"key",key},{"status",recommendation},{"automaticApplicationAllowed",false},
@@ -254,10 +260,11 @@ void Evaluate(Context& group,double referenceValue) {
                 result["basisNormalizedResidual"]=fit.basisNormalizedResidual;result["targetMotionRms"]=fit.targetMotionRms;
                 result["motionRelativeResidual"]=fit.hasMotion?Json(fit.motionRelativeResidual):Json(nullptr);
             }
-            const auto height=height_plan_core::FitSurface(map,anchor.positions,anchor.triangles,target.positions,target.triangles,donor.delta,donor.heelDelta,referenceValue);
-            result["heightFit"]={{"status",height.status},{"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},
+            const auto height=height_plan_core::FitSurface(map,anchor.positions,triangles,targetPositions,targetTriangles,donor.delta,donor.heelDelta,referenceValue,heelMax);
+            result["topologyMapping"]={{"status",aligned.status},{"removedVertices",aligned.removedVertices},{"removedComponents",aligned.removedComponents}};
+            result["heightFit"]={{"heelMax",heelMax},{"HeelAboveOne",height.controls.heel>1.0},{"status",height.status},{"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},
                 {"rmsResidual",height.rms},{"normalizedResidual",height.normalizedResidual},{"saturated",height.saturated},
-                {"NoHeelRaw",height.noHeel.raw},{"HeelRaw",height.heel.raw},{"policyDecision",height_plan_core::Decision(height)}};
+                {"NoHeelRaw",height.noHeel.raw},{"HeelRaw",height.heel.raw},{"policyDecision",height_plan_core::Decision(height,residualMax,allowEndpoints,heelMax)}};
             if(height.status=="bounded-height-fit") {
                 Json inputs=Json::array();std::set<std::string> seen;
                 auto add=[&](const Json& item){auto key=foot_capture_policy::ResourceKey(item.at("resource").get<std::string>());if(!key.empty()&&seen.insert(key).second)inputs.push_back(item);};
@@ -275,11 +282,11 @@ void Evaluate(Context& group,double referenceValue) {
                 if(dependenciesOK && donor.session==anchor.session && target.session==anchor.session) {
                     Json profile={{"heightSession",anchor.session},{"stocking",donor.identity},{"footwear",target.identity},
                         {"context",anchor.context},{"donorSourceFingerprint",donor.fingerprint},{"inputs",inputs},{"targetPositionFingerprint",target.positionFingerprint},
-                        {"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},{"normalizedResidual",height.normalizedResidual},
+                        {"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},{"heelMax",heelMax},{"HeelAboveOne",height.controls.heel>1.0},{"topologyMapping",result["topologyMapping"]},{"normalizedResidual",height.normalizedResidual},
                         {"rmsResidual",height.rms},{"saturated",height.saturated},{"referenceFootwear",anchor.identity},
                         {"sourceGeometryName",donor.source.at("sourceGeometryName")},
                         {"bodyTriFingerprint",donor.localFit.at("NoHeelSourceFingerprint")},
-                        {"policyDecision",height_plan_core::Decision(height)},
+                        {"policyDecision",height_plan_core::Decision(height,residualMax,allowEndpoints,heelMax)},
                         {"NoHeelRaw",height.noHeel.raw},{"HeelRaw",height.heel.raw},
                         {"referenceCapture",anchor.captureKey},{"targetCapture",target.captureKey},{"donorCapture",donor.captureKey},
                         {"semantics","bounded single native branch; fitting is not independent visual validation"}};
@@ -295,10 +302,11 @@ void Evaluate(Context& group,double referenceValue) {
 }
 } // namespace
 void Process(Json& document,const ReadMorph& readMorph) {
-    document["analysisGeneratorVersion"]="0.15.0";
+    document["analysisGeneratorVersion"]="0.16.0";
     document["surfaceCalibration"]={{"status","disabled"},{"automaticApplicationAllowed",false}};
     try {
         const auto cfg=Configuration();
+        if(document.value("heightSession",std::uint64_t{})!=height_profiles::Session())return;
         if(!cfg.value("measureSurfaceCalibration",false))return;
         const auto reference=cfg.value("surfaceCalibrationReference",Json::object());
         const auto armor=reference.value("armor",std::string{}),addon=reference.value("addon",std::string{});

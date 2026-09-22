@@ -2,6 +2,6 @@
 
 namespace VanityUBEHeelAdapterPlugin {
 inline constexpr auto NAME = "Vanity UBE Heel Adapter"sv;
-inline constexpr REL::Version VERSION{0, 15, 1, 0};
+inline constexpr REL::Version VERSION{0, 16, 0, 0};
 inline constexpr auto AUTHOR = "A90072180A"sv;
 }  // namespace VanityUBEHeelAdapterPlugin

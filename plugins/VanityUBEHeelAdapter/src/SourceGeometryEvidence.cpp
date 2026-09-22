@@ -1,3 +1,4 @@
+#include "ConfigState.h"
 #include "SourceGeometryEvidence.h"
 #include "NifSourceCore.h"
 #include "NativeFootFitCore.h"
@@ -19,7 +20,7 @@ namespace core=foot_snapshot_core;
 struct Asset { std::string status{"unreadable"},error,fingerprint,resource; nif::Result parsed; std::uintmax_t size{}; std::filesystem::file_time_type time{}; };
 // Writer-owned session cache. This is not an automatically applied shoe profile.
 std::unordered_map<std::string,std::shared_ptr<const Asset>> assets;
-Json Config(){try{std::ifstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");if(f){auto j=Json::parse(f);if(j.is_object())return j;}}catch(...){}return Json::object();}
+Json Config(){return config_state::Get();}
 std::shared_ptr<const Asset> Read(const std::string& resource){
  auto a=std::make_shared<Asset>();a->resource=resource;
  const auto key=foot_capture_policy::ResourceKey(resource);

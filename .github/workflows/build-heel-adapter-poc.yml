@@ -46,6 +46,22 @@ jobs:
         run: |
           g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/BarefootPolicyTests.cpp -o barefoot-policy-tests
           ./barefoot-policy-tests
+      - name: Validate extended heights and exact component subset correspondence
+        run: |
+          for test in ExtendedHeightTests TopologySubsetTests; do
+            g++ -std=c++20 -O1 -g -fsanitize=address,undefined plugins/VanityUBEHeelAdapter/tests/$test.cpp -o "$test"
+            ./"$test"
+          done
+      - name: Validate configuration, hot reload and editor
+        run: |
+          mkdir -p test-deps/nlohmann
+          curl --fail --location --retry 3 https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp -o test-deps/nlohmann/json.hpp
+          for test in ConfigurationTests RuntimeConfigurationTests HeightProfileCacheTests; do
+            g++ -std=c++20 -O0 -g -fsanitize=address,undefined -Itest-deps plugins/VanityUBEHeelAdapter/tests/$test.cpp -o "$test"
+            ./"$test"
+          done
+          python3 plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
+
   build:
     needs: core-tests
     runs-on: windows-2022
@@ -73,7 +89,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'MSVC installation not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests','BarefootPolicyTests')
+          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests','BarefootPolicyTests','ExtendedHeightTests','TopologySubsetTests')
           foreach ($test in $tests) {
             cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 /DNOMINMAX /FIWindows.h plugins\VanityUBEHeelAdapter\tests\$test.cpp /Fe:$test.exe && $test.exe"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -86,6 +102,17 @@ jobs:
           & build/runtime/flat/windows/x64/releasedbg/HeightProfileCacheTests.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Validate full configuration and file workers on Windows
+        shell: pwsh
+        run: |
+          foreach ($test in @('ConfigurationTests','RuntimeConfigurationTests')) {
+            xmake build -y $test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & "build/runtime/flat/windows/x64/releasedbg/$test.exe"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          python plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build adapter
         shell: pwsh
         run: |
@@ -100,16 +127,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'artifact/tools' | Out-Null
           Copy-Item $dll 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll'
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
-          Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE15-RELEASE.md' 'artifact/PHASE15-RELEASE.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/RELEASE-0.16.0.md' 'artifact/RELEASE-0.16.0.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/tools/height_editor.py' 'artifact/tools/height_editor.py'
           Copy-Item 'plugins/VanityUBEHeelAdapter/BAREFOOT-0.15.1.md' 'artifact/BAREFOOT-0.15.1.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
           @{
-            version = '0.15.1'
+            version = '0.16.0'
             commit = $env:GITHUB_SHA
             dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'
           New-Item -ItemType Directory -Force -Path 'artifact/examples' | Out-Null
-          Copy-Item 'plugins/VanityUBEHeelAdapter/config/signed-height-example.json' 'artifact/examples/signed-height-example.json'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.user.example.json' 'artifact/examples/VanityUBEHeelAdapter.user.example.json'
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

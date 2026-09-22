@@ -57,7 +57,7 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.15.1")
+    set_version("0.16.0")
     -- Must be defined before the plugin PCH includes Windows headers.
     -- Standalone algorithm tests previously missed the DLL's min/max collision.
     add_defines("NOMINMAX")
@@ -84,3 +84,19 @@ target("HeightProfileCacheTests")
     add_defines("NOMINMAX")
     add_files("plugins/VanityUBEHeelAdapter/tests/HeightProfileCacheTests.cpp")
     add_includedirs("plugins/VanityUBEHeelAdapter/src")
+
+-- Configuration and report workers built without any Skyrim types.
+target("RuntimeConfigurationTests")
+    set_kind("binary")
+    set_languages("c++20")
+    add_defines("NOMINMAX")
+    add_packages("nlohmann_json")
+    add_files("plugins/VanityUBEHeelAdapter/tests/RuntimeConfigurationTests.cpp")
+target_end()
+target("ConfigurationTests")
+    set_kind("binary")
+    set_languages("c++20")
+    add_defines("NOMINMAX")
+    add_packages("nlohmann_json")
+    add_files("plugins/VanityUBEHeelAdapter/tests/ConfigurationTests.cpp")
+target_end()

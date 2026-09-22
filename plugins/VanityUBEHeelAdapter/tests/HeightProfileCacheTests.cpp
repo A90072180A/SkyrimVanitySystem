@@ -6,6 +6,10 @@
 #include <format>
 #include <iostream>
 #include <stdexcept>
+#ifndef _WIN32
+#include <unistd.h>
+unsigned GetCurrentProcessId(){return static_cast<unsigned>(getpid());}
+#endif
 namespace logger {
 template<class... T> void info(const char*,T&&...) {}
 template<class... T> void warn(const char*,T&&...) {}
@@ -38,6 +42,7 @@ int main(){
             std::filesystem::create_directories("Data/SKSE/Plugins");
             std::ofstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");
             f<<Json{{"surfaceCalibrationReference",r}}.dump();
+            vanity_ube_heel_adapter::config_state::Set(Json{{"surfaceCalibrationReference",r},{"heelMax",2.0}});
         };
         setReference(ref);check(!hp::ReferenceStamp().empty());
         const auto bytes=tri();put("Data/Meshes/test/sock.tri",bytes);
@@ -50,13 +55,13 @@ int main(){
         Json identity={{"armor","sock.esp|00000001"},{"addon","sock.esp|00000002"},{"race","race.esp|00000001"},{"sexIndex",1},{"actorWeight",0.0}};
         Json shoe=identity;shoe["armor"]="shoe.esp|00000001";shoe["addon"]="shoe.esp|00000002";
         const auto context=Json::array({identity["race"],identity["sexIndex"],identity["actorWeight"],Json::array()}).dump();
-        Json p={{"heightSession",hp::Session()},{"algorithm","bounded-native-branches-v1"},{"stocking",identity},{"footwear",shoe},
+        Json p={{"heightSession",hp::Session()},{"algorithm","bounded-native-branches-v2"},{"stocking",identity},{"footwear",shoe},
             {"context",context},{"NoHeel",0.0},{"Heel",0.5},{"normalizedResidual",0.01},{"saturated",false},
             {"targetPositionFingerprint","1111111111111111"},{"donorSourceFingerprint","2222222222222222"},
             {"bodyTriFingerprint",fp},{"inputs",Json::array({{{"resource","test/sock.tri"},{"fingerprint",fp}}})}};
         check(hp::FormatValid(p));check(hp::InputsValid(p));
         for(const auto*key:{"bodyTriFingerprint","context","inputs","saturated","footwear","NoHeel"}){auto bad=p;bad.erase(key);check(!hp::FormatValid(bad));}
-        auto bad=p;bad["NoHeel"]=0.5;check(!hp::FormatValid(bad));bad=p;bad["Heel"]=1.1;check(!hp::FormatValid(bad));
+        auto bad=p;bad["NoHeel"]=0.5;check(!hp::FormatValid(bad));bad=p;bad["Heel"]=10.1;check(!hp::FormatValid(bad));bad=p;bad["NoHeel"]=1.01;check(!hp::FormatValid(bad));bad=p;bad["Heel"]=1.107;check(hp::FormatValid(bad));
         bad=p;bad["inputs"][0]["fingerprint"]="3333333333333333";check(!hp::InputsValid(bad));
         bad=p;bad["inputs"][0]["resource"]="../sock.tri";check(!hp::InputsValid(bad));
         hp::Publish(p);check(std::filesystem::exists(hp::kPath));

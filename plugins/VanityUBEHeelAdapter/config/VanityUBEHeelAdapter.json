@@ -43,5 +43,8 @@
   "heightMaxNormalizedResidual": 0.15,
   "allowHeightEndpointApproximation": false,
   "signedHeightOverrides": [],
-  "barefootFlatFeet": true
+  "barefootFlatFeet": true,
+  "heelMax": 2.0,
+  "writeRuntimeState": true,
+  "enableComponentSubset": true
 }

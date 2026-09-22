@@ -1,3 +1,4 @@
+#include "ConfigState.h"
 #include "FootGeometryCapture.h"
 #include "HeightProfiles.h"
 #include "FootSnapshotCore.h"
@@ -20,7 +21,7 @@ using Json = nlohmann::json;
 namespace core = foot_snapshot_core;
 namespace policy = foot_capture_policy;
 constexpr auto kDirectory = "Data/SKSE/Plugins/VanityUBEHeelAdapter/geometry";
-constexpr auto kVersion = "0.15.0";
+constexpr auto kVersion = "0.16.0";
 std::atomic_bool g_sessionReady{false};
 std::atomic<std::uint64_t> g_ticket{0};
 IBodyMorphInterface* g_morph{nullptr};
@@ -144,9 +145,7 @@ struct Options {
 Options ReadOptions()
 {
     try {
-        std::ifstream stream("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");
-        if (!stream) return {};
-        const auto config = Json::parse(stream);
+        const auto config = config_state::Get();
         Options out;
         out.writeSnapshot = config.value("exportFootGeometry", false);
         out.enabled = out.writeSnapshot || config.value("automaticHeight", true);
@@ -161,6 +160,11 @@ Options ReadOptions()
         }
         if (config.contains("stockings") && config["stockings"].is_array())
             for (const auto& entry : config["stockings"]) if (entry.is_string()) out.stockings.push_back(entry.get<std::string>());
+        const auto kinds=config.value("manualItemKinds",Json::object());
+        for(auto it=kinds.begin();it!=kinds.end();++it) {
+            if(it.value()=="stocking" && std::find(out.stockings.begin(),out.stockings.end(),it.key())==out.stockings.end())out.stockings.push_back(it.key());
+            if(it.value()=="ignore" || it.value()=="footwear")std::erase(out.stockings,it.key());
+        }
         return out;
     } catch (...) { return {}; }
 }

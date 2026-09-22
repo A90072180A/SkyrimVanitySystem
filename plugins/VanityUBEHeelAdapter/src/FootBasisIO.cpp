@@ -71,7 +71,7 @@ std::vector<std::string> MorphRequests(const Json&document){
 }
 void Enrich(Json&document){
     source_geometry_evidence::Resolve(document);
-    document["generatorVersion"]="0.15.0";document["schema"]=6;
+    document["generatorVersion"]="0.16.0";document["schema"]=6;
     document["triMorphData"]=Json::array();document["nativeMorphMeasurements"]=Json::array();document["referenceMorphMeasurements"]=Json::array();
     document["referenceCalibration"]={{"status","not-calibrated"},{"posture",nullptr}};
     if(document.value("geometryRole",std::string{})=="rejected-calibration-source")return;

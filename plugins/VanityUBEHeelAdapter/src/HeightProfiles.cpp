@@ -1,7 +1,12 @@
+#include "FootSnapshotCore.h"
+#include "ConfigState.h"
+#include "ConfigurationCore.h"
 #include "HeightProfiles.h"
 #include "TriMorphCore.h"
 #include "FootCapturePolicy.h"
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include <condition_variable>
 #include <deque>
 #include <fstream>
@@ -12,7 +17,7 @@
 namespace vanity_ube_heel_adapter::height_profiles {
 namespace {
 constexpr auto kPath="Data/SKSE/Plugins/VanityUBEHeelAdapter/height-profiles.json";
-constexpr auto kAlgorithm="bounded-native-branches-v1";
+constexpr auto kAlgorithm="bounded-native-branches-v2";
 std::mutex mutex;
 std::map<std::string,Json> profiles, observed, observedDonors;
 std::map<std::string,Capability> capabilities;
@@ -39,16 +44,14 @@ void Signal(){if(auto cb=notify.load())cb();}
 // Called only on cache/snapshot workers, never on a game task.
 std::string ReferenceStamp(){
     try {
-        std::ifstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter.json",std::ios::binary|std::ios::ate);
-        if(!f || f.tellg()>1024*1024)return {};f.seekg(0);
-        const auto cfg=Json::parse(f);
+        const auto cfg=config_state::Get();
         const auto& r=cfg.at("surfaceCalibrationReference");
         if(!r.is_object() || !r.at("armor").is_string() || !r.at("addon").is_string() ||
            r.at("armor").get<std::string>().empty() || r.at("addon").get<std::string>().empty() ||
            !r.at("noHeel").is_number())return {};
         const auto q=r.at("noHeel").get<double>();
         if(!std::isfinite(q)||q<0||q>1)return {};
-        return r.dump();
+        return Json::array({r,cfg.value("heelMax",2.0),cfg.value("enableComponentSubset",true)}).dump();
     }catch(...){return {};}
 }
 std::string Key(const Json&p){return Json::array({p.at("footwear").at("armor"),p.at("footwear").at("addon"),p.at("stocking").at("armor"),p.at("stocking").at("addon"),p.at("context")}).dump();}
@@ -60,7 +63,7 @@ bool FormatValid(const Json&p){
         if(!p.is_object()||p.value("algorithm",std::string{})!=kAlgorithm||!p.at("context").is_string()||
            !p.at("targetPositionFingerprint").is_string()||!p.at("donorSourceFingerprint").is_string()||!p.at("inputs").is_array()||p.at("inputs").empty()||p.at("inputs").size()>24)return false;
         const auto c=height_plan_core::Controls{p.at("NoHeel").get<double>(),p.at("Heel").get<double>()};
-        if(!height_plan_core::Valid(c)||!std::isfinite(p.at("normalizedResidual").get<double>())||p.at("normalizedResidual").get<double>()<0)return false;
+        if(!height_plan_core::Valid(c,height_plan_core::AbsoluteHeelLimit)||!std::isfinite(p.at("normalizedResidual").get<double>())||p.at("normalizedResidual").get<double>()<0)return false;
         for(const auto* kind:{"stocking","footwear"}) for(const auto*field:{"armor","addon"})
             if(!p.at(kind).at(field).is_string()||p.at(kind).at(field).get<std::string>().empty())return false;
         if(!p.at("saturated").is_boolean())return false;
@@ -77,13 +80,17 @@ bool InputsValid(const Json&p){
 }
 void Persist(){
     std::scoped_lock diskLock(diskMutex);
-    Json out={{"schema",1},{"algorithm",kAlgorithm},{"generatorVersion","0.15.0"},{"entries",Json::array()}};
+    Json out={{"schema",1},{"algorithm",kAlgorithm},{"generatorVersion","0.16.0"},{"entries",Json::array()}};
     {std::scoped_lock lock(mutex);for(const auto&[k,p]:profiles)out["entries"].push_back(p);}
     const std::filesystem::path path{kPath},tmp{std::string(kPath)+".tmp"};
     std::filesystem::create_directories(path.parent_path());
     std::ofstream f(tmp,std::ios::binary|std::ios::trunc);if(!f)throw std::runtime_error("height cache open failed");
     f<<out.dump(2)<<'\n';f.flush();if(!f)throw std::runtime_error("height cache flush failed");f.close();if(f.fail())throw std::runtime_error("height cache close failed");
+#ifdef _WIN32
     if(!::MoveFileExW(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("height cache atomic replace failed");
+#else
+    std::filesystem::rename(tmp,path);
+#endif
 }
 void Load(std::uint64_t epoch){
     std::ifstream f(kPath,std::ios::binary|std::ios::ate);if(!f)return;
@@ -173,6 +180,7 @@ void Publish(Json p){
     const auto reference=ReferenceStamp();if(reference.empty())return;
     p["referenceConfiguration"]=reference;
     p["algorithm"]=kAlgorithm;
+    p["key"]=std::format("{:016x}",foot_snapshot_core::HashText(Key(p)));
     if(!FormatValid(p))return;
     // Source hashes are checked once when restoring persisted entries, and are
     // produced by current source-verified snapshots for newly computed entries.
