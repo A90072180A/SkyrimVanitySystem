@@ -1,13 +1,13 @@
 {
   "applyMorph": true,
   "autoDetectStockings": true,
-  "autoPostureFromBodySlide": true,
+  "autoPostureFromBodySlide": false,
   "allowSliderSetDefaultPosture": false,
-  "logBodySlideCandidates": true,
+  "logBodySlideCandidates": false,
   "debugDiagnostics": false,
-  "geometryDiagnostics": true,
-  "writeGeneratedProfiles": true,
-  "exportFootGeometry": true,
+  "geometryDiagnostics": false,
+  "writeGeneratedProfiles": false,
+  "exportFootGeometry": false,
   "exportStockingCalibration": true,
   "referenceBodyTri": "!UBE\\Feet\\femalefeet_tangent.tri",
   "referenceFeetModels": [
@@ -19,9 +19,17 @@
       "[Caenarvon] Cosplay Basics UBE patch.esp|0000093B"
     ]
   },
-  "diagnosticFootMorphs": ["NoHeel", "HiHeelz_CBBE", "HiHeelz_CBBE_to_UBE"],
-  "stockings": ["[Caenarvon] Cosplay Basics.esp|00000D1A"],
-  "heels": {"[AFxII] Converse AS.esp|0000080A": 1.0},
+  "diagnosticFootMorphs": [
+    "NoHeel",
+    "HiHeelz_CBBE",
+    "HiHeelz_CBBE_to_UBE"
+  ],
+  "stockings": [
+    "[Caenarvon] Cosplay Basics.esp|00000D1A"
+  ],
+  "heels": {
+    "[AFxII] Converse AS.esp|0000080A": 1.0
+  },
   "stockingMorphProfiles": [],
   "measureSurfaceCalibration": true,
   "surfaceCalibrationReference": {
@@ -29,6 +37,10 @@
     "addon": "[AFxII] Converse AS.esp|00000809",
     "noHeel": 1.0
   },
-  "measureStockingClearance": true,
-  "writeStockingFitPreview": true
+  "measureStockingClearance": false,
+  "writeStockingFitPreview": false,
+  "automaticHeight": true,
+  "heightMaxNormalizedResidual": 0.15,
+  "allowHeightEndpointApproximation": false,
+  "signedHeightOverrides": []
 }

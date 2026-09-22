@@ -1,4 +1,5 @@
 #include "FootBasisIO.h"
+#include "HeightProfiles.h"
 #include "TriMorphCore.h"
 #include "FootCapturePolicy.h"
 #include "SourceGeometryEvidence.h"
@@ -70,7 +71,7 @@ std::vector<std::string> MorphRequests(const Json&document){
 }
 void Enrich(Json&document){
     source_geometry_evidence::Resolve(document);
-    document["generatorVersion"]="0.14.0";document["schema"]=6;
+    document["generatorVersion"]="0.15.0";document["schema"]=6;
     document["triMorphData"]=Json::array();document["nativeMorphMeasurements"]=Json::array();document["referenceMorphMeasurements"]=Json::array();
     document["referenceCalibration"]={{"status","not-calibrated"},{"posture",nullptr}};
     if(document.value("geometryRole",std::string{})=="rejected-calibration-source")return;
@@ -91,7 +92,8 @@ void Enrich(Json&document){
     const auto reference=document.value("requestedReferenceBodyTri",std::string{});
     if(!reference.empty())for(const auto&morph:morphs){auto result=ReadBasis(reference,"Feet",morph,65536u);if(morph=="NoHeel")document["referenceTriBasis"]=result;document["referenceMorphMeasurements"].push_back(std::move(result));}
     source_geometry_evidence::Measure(document,ReadBasis);
+    height_profiles::ObserveFoot(document);
     stocking_surface_calibration::Process(document,ReadBasis);
-    stocking_clearance_diagnostics::Process(document);
+    // Clearance and tightening deliberately paused for the height milestone.
 }
 } // namespace vanity_ube_heel_adapter::foot_basis_io

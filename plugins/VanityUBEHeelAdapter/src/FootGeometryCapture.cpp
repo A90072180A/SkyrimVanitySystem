@@ -1,4 +1,5 @@
 #include "FootGeometryCapture.h"
+#include "HeightProfiles.h"
 #include "FootSnapshotCore.h"
 #include "FootBasisIO.h"
 #include "FootCapturePolicy.h"
@@ -19,7 +20,8 @@ using Json = nlohmann::json;
 namespace core = foot_snapshot_core;
 namespace policy = foot_capture_policy;
 constexpr auto kDirectory = "Data/SKSE/Plugins/VanityUBEHeelAdapter/geometry";
-constexpr auto kVersion = "0.11.0";
+constexpr auto kVersion = "0.15.0";
+std::atomic_bool g_sessionReady{false};
 std::atomic<std::uint64_t> g_ticket{0};
 IBodyMorphInterface* g_morph{nullptr};
 std::mutex g_captureMutex;
@@ -135,7 +137,7 @@ Json MorphValues(RE::Actor* actor)
     return visitor.values;
 }
 struct Options {
-    bool enabled{false}, exportStockings{false};
+    bool enabled{false}, exportStockings{false}, writeSnapshot{false};
     std::string reference;
     std::vector<std::string> morphs, stockings;
 };
@@ -146,8 +148,9 @@ Options ReadOptions()
         if (!stream) return {};
         const auto config = Json::parse(stream);
         Options out;
-        out.enabled = config.value("exportFootGeometry", false);
-        out.exportStockings = config.value("exportStockingCalibration", false);
+        out.writeSnapshot = config.value("exportFootGeometry", false);
+        out.enabled = out.writeSnapshot || config.value("automaticHeight", true);
+        out.exportStockings = config.value("exportStockingCalibration", false) || config.value("automaticHeight", true);
         out.reference = config.value("referenceBodyTri", std::string{});
         const auto requested = config.value("diagnosticFootMorphs", Json::array({"NoHeel", "HiHeelz_CBBE", "HiHeelz_CBBE_to_UBE"}));
         if (requested.is_array()) for (const auto& entry : requested) {
@@ -224,9 +227,12 @@ class Writer {
     std::condition_variable condition;
     std::deque<WriteJob> jobs;
     std::unordered_set<std::string> pending, done;
+    std::uint64_t lastSession{};
     std::jthread worker;
     void Write(WriteJob& job) {
+        if(job.document.value("heightSession",std::uint64_t{})!=height_profiles::Session())return;
         foot_basis_io::Enrich(job.document);
+        if(!job.document.value("writeGeometrySnapshot",true)||job.document.value("heightSession",std::uint64_t{})!=height_profiles::Session())return;
         const auto path = std::filesystem::path(kDirectory) / ("foot-" + job.key + ".json");
         const auto temp = std::filesystem::path(path.wstring() + L".tmp");
         std::error_code ec;
@@ -258,8 +264,8 @@ class Writer {
             catch (const std::exception& e) { logger::warn("[foot snapshot] write failed: {}", e.what()); }
             catch (...) { logger::warn("[foot snapshot] write failed"); }
             {
-                std::scoped_lock lock(mutex); pending.erase(job.key);
-                if (success) done.insert(job.key);
+                std::scoped_lock lock(mutex); const auto requestKey=std::to_string(job.document.value("heightSession",std::uint64_t{}))+"|"+job.key; pending.erase(requestKey);
+                if (success) done.insert(requestKey);
             }
         }
     }
@@ -268,9 +274,12 @@ public:
     ~Writer() { worker.request_stop(); condition.notify_all(); worker.join(); }
     void Submit(WriteJob job) {
         std::scoped_lock lock(mutex);
-        if (pending.contains(job.key) || done.contains(job.key)) return;
+        const auto epoch=job.document.value("heightSession",std::uint64_t{});
+        if(epoch!=lastSession){jobs.clear();pending.clear();done.clear();lastSession=epoch;}
+        const auto requestKey=std::to_string(epoch)+"|"+job.key;
+        if (pending.contains(requestKey) || done.contains(requestKey)) return;
         if (jobs.size() >= 8) { logger::warn("[foot snapshot] writer queue full; retry later"); return; }
-        pending.insert(job.key); jobs.push_back(std::move(job)); condition.notify_one();
+        pending.insert(requestKey); jobs.push_back(std::move(job)); condition.notify_one();
     }
 };
 Writer& GetWriter() { static Writer writer; return writer; }
@@ -320,7 +329,7 @@ void Emit(RE::Actor* player, const Candidate& candidate, RE::BSGeometry* geometr
         {"positionSpanBytes", view.positionSpan}, {"componentBytes", view.componentBytes},
         {"gpuAllocationBytes", view.bufferBytes}, {"vertexMap", mapKind}, {"accessFault", view.fault},
         {"positionSource", "skin-partition.buffData.rawVertexData"}, {"indexSource", "skin-partition.triList"}};
-    Json document = {{"schema", 3}, {"generatorVersion", kVersion}, {"status", "diagnostic-only"},
+    Json document = {{"schema", 3}, {"generatorVersion", kVersion}, {"status", "diagnostic-only"}, {"heightSession", height_profiles::Session()}, {"writeGeometrySnapshot",options.writeSnapshot},
         {"source", "current-graph-calibration-snapshot"}, {"geometryRole", candidate.role},
         {"identity", {{"armor", armor}, {"addon", addon}, {"armaModel", model ? model : ""},
             {"bodyTriPaths", triPaths}, {"slot", candidate.slot}, {"buffered", false}, {"sexIndex", sexIndex},
@@ -430,9 +439,9 @@ void Capture(unsigned attempt)
 }
 void QueueAttempt(std::uint64_t ticket, unsigned attempt)
 {
-    if (!policy::CurrentTicket(ticket, g_ticket.load())) return;
+    if (!g_sessionReady.load() || !policy::CurrentTicket(ticket, g_ticket.load())) return;
     if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask([ticket, attempt] {
-        if (!policy::CurrentTicket(ticket, g_ticket.load())) return;
+        if (!g_sessionReady.load() || !policy::CurrentTicket(ticket, g_ticket.load())) return;
         try { Capture(attempt); }
         catch (const std::exception& e) { logger::warn("[foot snapshot] capture failed: {}", e.what()); }
         catch (...) { logger::warn("[foot snapshot] capture failed"); }
@@ -466,7 +475,7 @@ public:
     ~RetryTimer() { worker.request_stop(); condition.notify_all(); worker.join(); }
     void Arm(std::uint64_t ticket) {
         std::scoped_lock lock(mutex);
-        if (!policy::CurrentTicket(ticket, g_ticket.load())) return;
+        if (!g_sessionReady.load() || !policy::CurrentTicket(ticket, g_ticket.load())) return;
         current = ticket; start = std::chrono::steady_clock::now(); condition.notify_all();
     }
 };
@@ -485,8 +494,10 @@ void SetMorphInterface(IBodyMorphInterface* value)
     updates->AddInterface(&g_footObserver); g_observerRegistered = true;
     logger::info("[foot snapshot] registered live slot37 observer; timed retries=150/500/1500ms; no morph aliases");
 }
+void SetSessionReady(bool ready){g_sessionReady.store(ready);if(!ready)g_ticket.fetch_add(1);}
 void RequestCapture()
 {
+    if(!g_sessionReady.load())return;
     const auto ticket = g_ticket.fetch_add(1) + 1;
     QueueAttempt(ticket, 0);
     GetRetryTimer().Arm(ticket);

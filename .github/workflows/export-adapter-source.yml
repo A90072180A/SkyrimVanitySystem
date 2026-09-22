@@ -13,7 +13,7 @@ jobs:
       - name: Archive committed source and identity
         run: |
           mkdir -p source-bundle
-          git archive --format=zip --output=source-bundle/source.zip HEAD
+          git archive --format=zip --output=source-bundle/source.zip HEAD plugins/VanityUBEHeelAdapter src/api xmake.lua .github/workflows
           git rev-parse HEAD > source-bundle/COMMIT.txt
           sha256sum source-bundle/source.zip > source-bundle/SHA256SUMS
       - uses: actions/upload-artifact@v4

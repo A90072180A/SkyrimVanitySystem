@@ -1,0 +1,10 @@
+{
+  "_note": "Illustration only; NOT loaded by the DLL. Heel=1 for Glass is an unvalidated bounded endpoint, NOT an exact automatic fit. Merge deliberately into signedHeightOverrides.",
+  "signedHeightOverrides": [
+    {
+      "stocking": "[Caenarvon] Cosplay Basics.esp|00000D1A",
+      "footwear": "Glass high-heeled shoes.esp|00000801",
+      "signedPosture": -1.0
+    }
+  ]
+}

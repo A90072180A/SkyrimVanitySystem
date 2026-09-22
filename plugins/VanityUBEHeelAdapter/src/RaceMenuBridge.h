@@ -1,4 +1,5 @@
 #pragma once
+#include "ScopedMorphTransaction.h"
 
 namespace vanity_ube_heel_adapter::racemenu {
 
@@ -52,6 +53,12 @@ using AttachmentChangedCallback = void (*)();
 
 bool Initialize();
 bool Available();
+void ResetAttachmentCache();
+std::string ActorMorphContext(RE::Actor* actor);
+bool IsLive(RE::NiAVObject* object);
+bool RestoreScopedMorphs(RE::Actor* actor, RE::NiAVObject* root);
+bool ApplyScopedMorphs(RE::Actor* actor, RE::NiAVObject* root,
+    std::span<const scoped_morph_transaction::Target> targets, std::string_view context);
 void SetAttachmentChangedCallback(AttachmentChangedCallback a_callback);
 std::vector<AttachmentRecord> GetPlayerAttachments();
 std::vector<SceneBodyTriRecord> ScanPlayerBodyTriNodes();

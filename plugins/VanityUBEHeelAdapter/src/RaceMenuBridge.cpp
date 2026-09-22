@@ -1,6 +1,7 @@
 #include "RaceMenuBridge.h"
 #include "SkeeAPI.h"
 #include "FootGeometryCapture.h"
+#include <nlohmann/json.hpp>
 
 namespace vanity_ube_heel_adapter::racemenu {
 namespace {
@@ -12,6 +13,7 @@ std::mutex g_mutex;
 std::vector<AttachmentRecord> g_attachments;
 std::uint64_t g_sequence{0};
 AttachmentChangedCallback g_attachmentChanged{nullptr};
+std::atomic_bool g_insideApply{false};
 
 std::string FindBodyTriPath(RE::NiAVObject* a_root)
 {
@@ -103,6 +105,14 @@ bool Initialize()
     }
     foot_capture::SetMorphInterface(g_bodyMorph);
     g_actorUpdates->AddInterface(std::addressof(g_observer));
+    if(g_bodyMorph->GetVersion()>=5)g_bodyMorph->AddMorphShapeCallback(
+        [](TESObjectREFR* ref, NiAVObject*, BSGeometry*, NiSkinPartition*, NiBinaryExtraData*) {
+            if(g_insideApply.load()||ref!=reinterpret_cast<TESObjectREFR*>(RE::PlayerCharacter::GetSingleton()))return;
+            AttachmentChangedCallback cb=nullptr;
+            {std::scoped_lock lock(g_mutex);cb=g_attachmentChanged;}
+            if(cb)cb(); // queue only: RaceMenu may invoke this off the game thread.
+            foot_capture::RequestCapture();
+        });
     logger::info("RaceMenu integration ready: BodyMorph v{} ActorUpdateManager v{}",
         g_bodyMorph->GetVersion(), g_actorUpdates->GetVersion());
     return true;
@@ -210,29 +220,74 @@ std::vector<BipedPartRecord> ScanPlayerBipedParts()
     return records;
 }
 
-bool ApplyScopedMorph(RE::Actor* a_actor, RE::NiAVObject* a_root,
-    const std::string_view a_morphName, const float a_targetValue,
-    const std::string_view a_context)
+void ResetAttachmentCache(){std::scoped_lock lock(g_mutex);g_attachments.clear();}
+bool IsLive(RE::NiAVObject* wanted)
 {
-    if (!g_bodyMorph || !a_actor || !a_root || a_morphName.empty()) return false;
-    const auto bodyTri = FindBodyTriPath(a_root);
-    if (bodyTri.empty()) {
-        logger::warn("[local morph] skipped: target '{}' has no BODYTRI", a_context);
-        return false;
-    }
-    const std::string morphName(a_morphName);
-    auto* refr = reinterpret_cast<TESObjectREFR*>(a_actor);
-    const bool hadOwnKey = g_bodyMorph->HasBodyMorph(refr, morphName.c_str(), kMorphKey);
-    const float previousOwn = g_bodyMorph->GetMorph(refr, morphName.c_str(), kMorphKey);
-    const float totalBefore = g_bodyMorph->GetBodyMorphs(refr, morphName.c_str());
-    const float otherKeys = totalBefore - previousOwn;
-    const float temporaryOwn = a_targetValue - otherKeys;
-    g_bodyMorph->SetMorph(refr, morphName.c_str(), kMorphKey, temporaryOwn);
-    g_bodyMorph->ApplyVertexDiff(refr, reinterpret_cast<NiAVObject*>(a_root), false);
-    if (hadOwnKey) g_bodyMorph->SetMorph(refr, morphName.c_str(), kMorphKey, previousOwn);
-    else g_bodyMorph->ClearMorph(refr, morphName.c_str(), kMorphKey);
-    logger::info("[local morph] applied context='{}' BODYTRI='{}' morph='{}' targetValue={:.3f} totalBefore={:.3f} otherKeys={:.3f} temporaryAdapterKey={:.3f}",
-        a_context, bodyTri, morphName, a_targetValue, totalBefore, otherKeys, temporaryOwn);
-    return true;
+    auto* player=RE::PlayerCharacter::GetSingleton();if(!player||!wanted)return false;
+    auto contains=[&](RE::NiAVObject* root){bool found=false;
+        RE::BSVisit::TraverseScenegraphObjects(root,[&](RE::NiAVObject* node){
+            if(node==wanted){found=true;return RE::BSVisit::BSVisitControl::kStop;}
+            return RE::BSVisit::BSVisitControl::kContinue;});return found;};
+    if(contains(player->Get3D(false)))return true;
+    const auto& biped=player->GetBiped(false);if(!biped)return false;
+    for(unsigned i=0;i<static_cast<unsigned>(RE::BIPED_OBJECTS::kTotal);++i)
+        if(biped->objects[i].partClone&&contains(biped->objects[i].partClone.get()))return true;
+    return false;
+}
+std::string ActorMorphContext(RE::Actor* actor)
+{
+    using Json=nlohmann::json;
+    if(!g_bodyMorph||!actor||!actor->GetActorBase()||!actor->GetRace())return {};
+    struct Visitor final:IBodyMorphInterface::MorphValueVisitor {
+        Json rows=Json::array();bool valid=true;
+        void Visit(TESObjectREFR*,const char* name,const char* key,float value)override {
+            if(!name||!key||!std::isfinite(value)){valid=false;return;}
+            rows.push_back({{"name",name},{"key",key},{"value",value}});
+        }
+    } visitor;
+    g_bodyMorph->VisitMorphValues(reinterpret_cast<TESObjectREFR*>(actor),visitor);
+    if(!visitor.valid)return {};
+    std::sort(visitor.rows.begin(),visitor.rows.end(),[](const Json&a,const Json&b){
+        return std::make_pair(a.at("name").get<std::string>(),a.at("key").get<std::string>())<
+            std::make_pair(b.at("name").get<std::string>(),b.at("key").get<std::string>());});
+    auto* race=actor->GetRace();auto* file=race->GetFile(0);if(!file)return {};
+    const auto raceID=std::format("{}|{:08X}",file->GetFilename(),race->GetLocalFormID());
+    return Json::array({raceID,actor->GetActorBase()->GetSex()==RE::SEX::kFemale?1u:0u,
+        actor->GetActorBase()->GetWeight(),visitor.rows}).dump();
+}
+bool ApplyScopedMorphs(RE::Actor* actor,RE::NiAVObject* root,
+    std::span<const scoped_morph_transaction::Target> targets,std::string_view context)
+{
+    if(!g_bodyMorph||!actor||!root||!IsLive(root)||FindBodyTriPath(root).empty())return false;
+    if(g_insideApply.exchange(true))return false;
+    struct Leave {~Leave(){g_insideApply.store(false);}} leave;
+    struct Backend {
+        TESObjectREFR* ref;NiAVObject* root;
+        bool Has(const std::string&n){return g_bodyMorph->HasBodyMorph(ref,n.c_str(),kMorphKey);}
+        float Get(const std::string&n){return g_bodyMorph->GetMorph(ref,n.c_str(),kMorphKey);}
+        float Effective(const std::string&n){return g_bodyMorph->GetBodyMorphs(ref,n.c_str());}
+        void Set(const std::string&n,float v){g_bodyMorph->SetMorph(ref,n.c_str(),kMorphKey,v);}
+        void Clear(const std::string&n){g_bodyMorph->ClearMorph(ref,n.c_str(),kMorphKey);}
+        void Apply(){g_bodyMorph->ApplyVertexDiff(ref,root,false);}
+    } backend{reinterpret_cast<TESObjectREFR*>(actor),reinterpret_cast<NiAVObject*>(root)};
+    try {
+        const bool ok=scoped_morph_transaction::Run(backend,targets);
+        if(!ok)logger::warn("[height apply] refused nonfinite/duplicate target or incompatible aggregate: {}",context);
+        return ok;
+    }catch(const std::exception&e){logger::warn("[height apply] exception after restoring temporary keys: {}",e.what());return false;}
+    catch(...){logger::warn("[height apply] exception after restoring temporary keys");return false;}
+}
+bool RestoreScopedMorphs(RE::Actor* actor,RE::NiAVObject* root)
+{
+    if(!g_bodyMorph||!actor||!root||!IsLive(root)||FindBodyTriPath(root).empty()||g_insideApply.exchange(true))return false;
+    struct Leave {~Leave(){g_insideApply.store(false);}} leave;
+    try {g_bodyMorph->ApplyVertexDiff(reinterpret_cast<TESObjectREFR*>(actor),reinterpret_cast<NiAVObject*>(root),false);return true;}
+    catch(...){return false;}
+}
+bool ApplyScopedMorph(RE::Actor* actor, RE::NiAVObject* root,
+    std::string_view name,float value,std::string_view context)
+{
+    const scoped_morph_transaction::Target target{std::string(name),value};
+    return ApplyScopedMorphs(actor,root,std::span{&target,1},context);
 }
 } // namespace vanity_ube_heel_adapter::racemenu

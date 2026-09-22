@@ -36,7 +36,12 @@ jobs:
         run: |
           g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/StockingClearanceCoreTests.cpp -o stocking-clearance-tests
           ./stocking-clearance-tests
-
+      - name: Validate branch selection and transactional key restoration
+        run: |
+          g++ -std=c++20 -O1 -g -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer plugins/VanityUBEHeelAdapter/tests/HeightPlanTests.cpp -o height-plan-tests
+          ./height-plan-tests
+          python3 -m py_compile plugins/VanityUBEHeelAdapter/tools/replay_height.py
+          g++ -std=c++20 -O2 -Wall -Wextra plugins/VanityUBEHeelAdapter/tools/replay_height.cpp -o replay-height
   build:
     needs: core-tests
     runs-on: windows-2022
@@ -64,11 +69,19 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'MSVC installation not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests')
+          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests')
           foreach ($test in $tests) {
             cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 /DNOMINMAX /FIWindows.h plugins\VanityUBEHeelAdapter\tests\$test.cpp /Fe:$test.exe && $test.exe"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Test actual cache and capability I/O
+        shell: pwsh
+        run: |
+          xmake build -y HeightProfileCacheTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & build/runtime/flat/windows/x64/releasedbg/HeightProfileCacheTests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build adapter
         shell: pwsh
         run: |
@@ -83,8 +96,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'artifact/tools' | Out-Null
           Copy-Item $dll 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll'
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
-          Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE14-TEST.md' 'artifact/PHASE14-TEST.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/PHASE15-RELEASE.md' 'artifact/PHASE15-RELEASE.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
+          @{
+            version = '0.15.0'
+            commit = $env:GITHUB_SHA
+            dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
+          } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'
+          New-Item -ItemType Directory -Force -Path 'artifact/examples' | Out-Null
+          Copy-Item 'plugins/VanityUBEHeelAdapter/config/signed-height-example.json' 'artifact/examples/signed-height-example.json'
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

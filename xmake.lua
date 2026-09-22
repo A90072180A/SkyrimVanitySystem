@@ -57,7 +57,7 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.14.0")
+    set_version("0.15.0")
     -- Must be defined before the plugin PCH includes Windows headers.
     -- Standalone algorithm tests previously missed the DLL's min/max collision.
     add_defines("NOMINMAX")
@@ -75,3 +75,12 @@ target("VanityUBEHeelAdapter")
     add_headerfiles("plugins/VanityUBEHeelAdapter/src/**.h")
     add_includedirs("src", "plugins/VanityUBEHeelAdapter/src")
     set_pcxxheader("plugins/VanityUBEHeelAdapter/src/pch.h")
+
+-- Exercises the actual asynchronous-cache implementation with synthetic files.
+-- No game runtime or CommonLib is required by this standalone executable.
+target("HeightProfileCacheTests")
+    set_kind("binary")
+    add_packages("nlohmann_json")
+    add_defines("NOMINMAX")
+    add_files("plugins/VanityUBEHeelAdapter/tests/HeightProfileCacheTests.cpp")
+    add_includedirs("plugins/VanityUBEHeelAdapter/src")

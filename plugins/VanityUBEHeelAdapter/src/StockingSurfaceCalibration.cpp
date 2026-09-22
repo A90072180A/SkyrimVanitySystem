@@ -1,5 +1,7 @@
 #include "StockingSurfaceCalibration.h"
 #include "SurfacePostureCore.h"
+#include "HeightPlanCore.h"
+#include "HeightProfiles.h"
 #include "NifSourceCore.h"
 #include "FootCapturePolicy.h"
 #include "TriMorphCore.h"
@@ -9,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <unordered_set>
 
 namespace vanity_ube_heel_adapter::stocking_surface_calibration {
@@ -80,10 +83,12 @@ bool SameTransform(const Json& a, const Json& b) {
     } catch (...) { return false; }
 }
 struct Sample {
-    std::vector<Point> positions, delta;
+    std::vector<Point> positions, delta, heelDelta;
     std::vector<Triangle> triangles;
     Json identity, source, local, skin, localFit;
-    std::string context, captureKey, fingerprint;
+    std::string context, captureKey, fingerprint, positionFingerprint;
+    std::uint64_t session{};
+    Json morphSources=Json::array();
 };
 std::optional<Sample> CheckedSample(const Json& d) {
     if (d.at("extraction").value("status", std::string{}) != "complete" ||
@@ -105,6 +110,10 @@ std::optional<Sample> CheckedSample(const Json& d) {
     s.context = Json::array({s.identity.at("race"), s.identity.at("sexIndex"),
                             s.identity.at("actorWeight"), d.at("actorMorphValues")}).dump();
     s.captureKey = d.value("captureKey", std::string{});
+    s.positionFingerprint=d.value("positionFingerprint",std::string{});
+    s.session=d.value("heightSession",std::uint64_t{});
+    for(const auto& m:d.value("nativeMorphMeasurements",Json::array()))
+        if(m.contains("sourceFingerprint"))s.morphSources.push_back({{"resource",m.at("resource")},{"fingerprint",m.at("sourceFingerprint")}});
     s.fingerprint = s.source.at("asset").value("sourceFingerprint", std::string{});
     return s;
 }
@@ -149,6 +158,11 @@ bool ReconstructDonor(Sample& s, Json& d, const ReadMorph& readMorph, double ref
     auto noHeel=readMorph(l->bodyTris[0],l->name,"NoHeel",n);
     if (noHeel.value("status",std::string{})!="present") return finish("NoHeel-unavailable");
     auto deltas=Dense(noHeel,n); if(!deltas) return finish("invalid-NoHeel-record");
+    const auto heel=readMorph(l->bodyTris[0],l->name,"Heel",n);
+    std::vector<Point> heelValues(n);
+    if(heel.value("status",std::string{})=="present") {
+        auto hd=Dense(heel,n);if(!hd)return finish("invalid-Heel-record");heelValues=std::move(*hd);
+    } else if(heel.value("status",std::string{})!="morph-absent" && heel.value("status",std::string{})!="empty-morph") return finish("Heel-capability-unknown");
     const double weight=s.identity.at("actorWeight").get<double>()/100.;
     if(!std::isfinite(weight)||weight<0||weight>1)return finish("invalid-actor-weight");
     std::vector<surface::Vec> baseline(n);
@@ -160,7 +174,7 @@ bool ReconstructDonor(Sample& s, Json& d, const ReadMorph& readMorph, double ref
     for(const auto& row:d.at("actorMorphValues")) {
         const auto name=row.at("name").get<std::string>();const auto value=row.at("value").get<double>();
         if(!std::isfinite(value))return finish("invalid-actor-morph-value");
-        if(value==0 || name=="NoHeel" || !available.contains(name))continue;
+        if(value==0 || (name=="NoHeel" || name=="Heel") || !available.contains(name))continue;
         if(!values.emplace(name,value).second)return finish("multiple-effective-morph-keys-unsupported");
     }
     for(const auto& [name,value]:values) {
@@ -168,21 +182,26 @@ bool ReconstructDonor(Sample& s, Json& d, const ReadMorph& readMorph, double ref
         if(!delta)return finish("stocking-own-body-morph-unavailable");
         for(unsigned i=0;i<n;++i)baseline[i]=surface::Add(baseline[i],surface::Mul(surface::V((*delta)[i]),value));
     }
-    double numerator=0,denominator=0;
-    for(unsigned i=0;i<n;++i){const auto v=surface::V((*deltas)[i]);denominator+=surface::Norm2(v);numerator+=surface::Dot(v,surface::Sub(surface::V(s.positions[i]),baseline[i]));}
-    if(denominator<1e-12)return finish("singular-NoHeel-basis");
-    const double q=numerator/denominator;
+    std::vector<surface::Vec> difference(n), nd(n), hd(n);
+    for(unsigned i=0;i<n;++i) {
+        difference[i]=surface::Sub(surface::V(s.positions[i]),baseline[i]);
+        nd[i]=surface::V((*deltas)[i]);hd[i]=surface::V(heelValues[i]);
+    }
+    const auto local=height_plan_core::Solve(difference,nd,hd);
+    if(local.status!="bounded-height-fit")return finish("unresolved-local-height");
+    const double q=local.controls.noHeel,hq=local.controls.heel;
     double sum2=0,active2=0,maxError=0;unsigned activeCount=0;
-    for(unsigned i=0;i<n;++i){const auto r=surface::Sub(surface::Sub(surface::V(s.positions[i]),baseline[i]),surface::Mul(surface::V((*deltas)[i]),q));const auto err=surface::Norm2(r);sum2+=err;maxError=std::max(maxError,std::sqrt(err));if(surface::Norm2(surface::V((*deltas)[i]))>=1e-4){active2+=err;++activeCount;}}
+    for(unsigned i=0;i<n;++i){const auto r=surface::Sub(surface::Sub(surface::V(s.positions[i]),baseline[i]),surface::Add(surface::Mul(surface::V((*deltas)[i]),q),surface::Mul(surface::V(heelValues[i]),hq)));const auto err=surface::Norm2(r);sum2+=err;maxError=std::max(maxError,std::sqrt(err));if(surface::Norm2(surface::V((*deltas)[i]))>=1e-4){active2+=err;++activeCount;}}
     if(!activeCount||!std::isfinite(q)||!std::isfinite(sum2))return finish("invalid-local-fit");
     const double rms=std::sqrt(sum2/n),activeRms=std::sqrt(active2/activeCount);
+    info["rawObservedHeel"]=hq;
     info["rawObservedNoHeel"]=q;info["allVertexRms"]=rms;info["affectedVertexRms"]=activeRms;info["maxVertexResidual"]=maxError;
     info["sourceFiles"]=Json::array({{{"resource",path0},{"fingerprint",lo->fingerprint}},{{"resource",path1},{"fingerprint",hi->fingerprint}}});
     info["NoHeelSourceFingerprint"]=noHeel.at("sourceFingerprint");info["ownBodyMorphCorrectionCount"]=values.size();info["referenceNoHeel"]=referenceValue;
     // Refuse a baseline that does not explain the observed mesh. This catches
     // unknown local sliders, changed builds, missing morphs and unmodelled edits.
     if(rms>0.05 || activeRms>0.03 || maxError>0.3)return finish("stocking-baseline-residual-too-large");
-    s.delta=std::move(*deltas);
+    s.delta=std::move(*deltas);s.heelDelta=std::move(heelValues);
     for(unsigned i=0;i<n;++i){const auto v=surface::Add(baseline[i],surface::Mul(surface::V(s.delta[i]),referenceValue));for(unsigned k=0;k<3;++k)s.positions[i][k]=static_cast<float>(v[k]);}
     info["status"]="source-reconstructed-reference";
     d["stockingLocalCalibration"]=info;s.localFit=info;
@@ -196,7 +215,7 @@ struct Context {
 std::map<std::string,Context> contexts;
 std::string PairID(const Sample& s) { return Json::array({s.identity.at("armor"),s.identity.at("addon"),s.identity.at("armaModel"),s.fingerprint}).dump(); }
 void Persist() {
-    Json out={{"schema",1},{"generatorVersion","0.13.0"},{"status","diagnostic-only"},
+    Json out={{"schema",1},{"generatorVersion","0.15.0"},{"status","diagnostic-only"},
               {"automaticApplicationAllowed",false},{"entries",Json::array()},
               {"semantics","reference-gap-preserving surface correspondence; no NoHeel/HiHeelz alias; no extrapolation applied"}};
     for(const auto& [key,result]:results)out["entries"].push_back(result);
@@ -213,7 +232,10 @@ void Evaluate(Context& group,double referenceValue) {
     const auto& anchor=*group.anchor;
     for(const auto& [donorID,donor]:group.donors) {
         if(!SameTransform(anchor.local,donor.local)||!SameTransform(anchor.skin,donor.skin))continue;
-        const auto map=surface::BuildMap(anchor.positions,anchor.triangles,donor.positions,donor.delta);
+        auto selection=donor.delta;
+        for(std::size_t i=0;i<selection.size();++i)if(surface::Norm2(surface::V(donor.heelDelta[i]))>surface::Norm2(surface::V(selection[i])))selection[i]=donor.heelDelta[i];
+        auto map=surface::BuildMap(anchor.positions,anchor.triangles,donor.positions,selection);
+        for(auto& m:map.entries)m.delta=surface::V(donor.delta[m.donorIndex]);
         for(const auto& [footID,target]:group.feet) {
             if(!SameTransform(anchor.local,target.local)||!SameTransform(anchor.skin,target.skin))continue;
             const auto fit=surface::FitTarget(map,anchor.positions,anchor.triangles,target.positions,target.triangles,referenceValue);
@@ -232,6 +254,38 @@ void Evaluate(Context& group,double referenceValue) {
                 result["basisNormalizedResidual"]=fit.basisNormalizedResidual;result["targetMotionRms"]=fit.targetMotionRms;
                 result["motionRelativeResidual"]=fit.hasMotion?Json(fit.motionRelativeResidual):Json(nullptr);
             }
+            const auto height=height_plan_core::FitSurface(map,anchor.positions,anchor.triangles,target.positions,target.triangles,donor.delta,donor.heelDelta,referenceValue);
+            result["heightFit"]={{"status",height.status},{"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},
+                {"rmsResidual",height.rms},{"normalizedResidual",height.normalizedResidual},{"saturated",height.saturated},
+                {"NoHeelRaw",height.noHeel.raw},{"HeelRaw",height.heel.raw},{"policyDecision",height_plan_core::Decision(height)}};
+            if(height.status=="bounded-height-fit") {
+                Json inputs=Json::array();std::set<std::string> seen;
+                auto add=[&](const Json& item){auto key=foot_capture_policy::ResourceKey(item.at("resource").get<std::string>());if(!key.empty()&&seen.insert(key).second)inputs.push_back(item);};
+                bool dependenciesOK=true;
+                for(const auto* sample:{&anchor,&target,&donor}) {
+                    auto path=foot_capture_policy::ResourceKey(sample->identity.at("armaModel").get<std::string>());
+                    const auto asset=ReadNif(path);if(!asset){dependenciesOK=false;break;}
+                    add({{"resource",path},{"fingerprint",asset->fingerprint}});
+                    if(path.ends_with("_1.nif")||path.ends_with("_0.nif")) {
+                        path[path.size()-5]=path[path.size()-5]=='1'?'0':'1';const auto other=ReadNif(path);
+                        if(!other){dependenciesOK=false;break;}add({{"resource",path},{"fingerprint",other->fingerprint}});
+                    }
+                    for(const auto&m:sample->morphSources)add(m);
+                }
+                if(dependenciesOK && donor.session==anchor.session && target.session==anchor.session) {
+                    Json profile={{"heightSession",anchor.session},{"stocking",donor.identity},{"footwear",target.identity},
+                        {"context",anchor.context},{"donorSourceFingerprint",donor.fingerprint},{"inputs",inputs},{"targetPositionFingerprint",target.positionFingerprint},
+                        {"NoHeel",height.controls.noHeel},{"Heel",height.controls.heel},{"normalizedResidual",height.normalizedResidual},
+                        {"rmsResidual",height.rms},{"saturated",height.saturated},{"referenceFootwear",anchor.identity},
+                        {"sourceGeometryName",donor.source.at("sourceGeometryName")},
+                        {"bodyTriFingerprint",donor.localFit.at("NoHeelSourceFingerprint")},
+                        {"policyDecision",height_plan_core::Decision(height)},
+                        {"NoHeelRaw",height.noHeel.raw},{"HeelRaw",height.heel.raw},
+                        {"referenceCapture",anchor.captureKey},{"targetCapture",target.captureKey},{"donorCapture",donor.captureKey},
+                        {"semantics","bounded single native branch; fitting is not independent visual validation"}};
+                    height_profiles::Publish(std::move(profile));
+                }
+            }
             if(results.size()>=64)results.erase(results.begin());
             results.insert_or_assign(key,std::move(result));
             logger::info("[surface posture] armor='{}' donor='{}' rawNoHeel={:.6f} residual={:.6f} status={} autoApply=false",target.identity.at("armor").get<std::string>(),donor.identity.at("armor").get<std::string>(),fit.rawNoHeel,fit.rmsResidual,recommendation);
@@ -241,7 +295,7 @@ void Evaluate(Context& group,double referenceValue) {
 }
 } // namespace
 void Process(Json& document,const ReadMorph& readMorph) {
-    document["analysisGeneratorVersion"]="0.13.0";
+    document["analysisGeneratorVersion"]="0.15.0";
     document["surfaceCalibration"]={{"status","disabled"},{"automaticApplicationAllowed",false}};
     try {
         const auto cfg=Configuration();
@@ -252,7 +306,7 @@ void Process(Json& document,const ReadMorph& readMorph) {
         if(armor.empty()||addon.empty()||!std::isfinite(referenceValue)||referenceValue<0||referenceValue>1){document["surfaceCalibration"]["status"]="invalid-reference-configuration";return;}
         auto sample=CheckedSample(document);
         if(!sample){document["surfaceCalibration"]["status"]="source-or-context-unverified";return;}
-        auto contextKey=sample->context+reference.dump();
+        auto contextKey=std::to_string(sample->session)+"|"+sample->context+reference.dump();
         if(!contexts.contains(contextKey)&&contexts.size()>=4)contexts.erase(contexts.begin());
         auto& group=contexts[contextKey];
         const auto role=document.value("geometryRole",std::string{});
