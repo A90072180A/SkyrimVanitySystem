@@ -33,6 +33,13 @@ int main(){
     const auto dir=std::filesystem::temp_directory_path()/std::format("svs-height-cache-test-{}",::GetCurrentProcessId());
     std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);std::filesystem::current_path(dir);
     try {
+        const Json ref={{"armor","reference.esp|00000001"},{"addon","reference.esp|00000002"},{"noHeel",1.0}};
+        auto setReference=[&](const Json& r){
+            std::filesystem::create_directories("Data/SKSE/Plugins");
+            std::ofstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter.json");
+            f<<Json{{"surfaceCalibrationReference",r}}.dump();
+        };
+        setReference(ref);check(!hp::ReferenceStamp().empty());
         const auto bytes=tri();put("Data/Meshes/test/sock.tri",bytes);
         const auto fp=hp::Fingerprint(bytes);
         auto c=hp::Probe("test/sock.tri");check(c.status=="parsed");check(c.fingerprint==fp);
@@ -61,6 +68,10 @@ int main(){
         hp::ObserveFoot(d);check(!lookup());d["identity"]=identity;d["geometryRole"]="stocking";hp::ObserveFoot(d);check(lookup().has_value());
         check(!hp::Lookup(shoe["armor"],shoe["addon"],identity["armor"],identity["addon"],"other-context"));
         {std::scoped_lock lock(hp::mutex);hp::profiles.clear();}check(!lookup());hp::Load(hp::Session());check(lookup().has_value());
+        auto changedReference=ref;changedReference["noHeel"]=0.5;setReference(changedReference);
+        {std::scoped_lock lock(hp::mutex);hp::profiles.clear();}hp::Load(hp::Session());check(!lookup());
+        setReference(Json::object());check(hp::ReferenceStamp().empty());hp::Load(hp::Session());check(!lookup());
+        setReference(ref);hp::Load(hp::Session());check(lookup().has_value());
         put("Data/Meshes/test/sock.tri",{'c','h','a','n','g','e','d'});check(!hp::InputsValid(p));
         {std::scoped_lock lock(hp::mutex);hp::profiles.clear();}hp::Load(hp::Session());check(!lookup());
         put("Data/Meshes/test/sock.tri",bytes);hp::Load(hp::Session());check(lookup().has_value());

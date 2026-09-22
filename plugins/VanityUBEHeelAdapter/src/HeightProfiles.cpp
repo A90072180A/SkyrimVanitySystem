@@ -34,6 +34,23 @@ std::optional<std::vector<std::uint8_t>> ReadResource(const std::string& resourc
 }
 std::string Fingerprint(const std::vector<std::uint8_t>& b){return std::format("{:016x}",tri_morph_core::HashBytes(b));}
 void Signal(){if(auto cb=notify.load())cb();}
+// The anchor is part of the numerical calibration, not just presentation.
+// Changing it invalidates an old disk profile even when meshes are unchanged.
+// Called only on cache/snapshot workers, never on a game task.
+std::string ReferenceStamp(){
+    try {
+        std::ifstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter.json",std::ios::binary|std::ios::ate);
+        if(!f || f.tellg()>1024*1024)return {};f.seekg(0);
+        const auto cfg=Json::parse(f);
+        const auto& r=cfg.at("surfaceCalibrationReference");
+        if(!r.is_object() || !r.at("armor").is_string() || !r.at("addon").is_string() ||
+           r.at("armor").get<std::string>().empty() || r.at("addon").get<std::string>().empty() ||
+           !r.at("noHeel").is_number())return {};
+        const auto q=r.at("noHeel").get<double>();
+        if(!std::isfinite(q)||q<0||q>1)return {};
+        return r.dump();
+    }catch(...){return {};}
+}
 std::string Key(const Json&p){return Json::array({p.at("footwear").at("armor"),p.at("footwear").at("addon"),p.at("stocking").at("armor"),p.at("stocking").at("addon"),p.at("context")}).dump();}
 std::string FootKey(const std::string&a,const std::string&b,const std::string&c){return Json::array({a,b,c}).dump();}
 bool FormatValid(const Json&p){
@@ -73,10 +90,11 @@ void Load(std::uint64_t epoch){
     if(f.tellg()>8*1024*1024)return;f.seekg(0);
     auto root=Json::parse(f);
     if(root.value("schema",0)!=1||root.value("algorithm",std::string{})!=kAlgorithm||!root.at("entries").is_array()||root.at("entries").size()>64)return;
+    const auto reference=ReferenceStamp();if(reference.empty())return;
     unsigned accepted=0,rejected=0;
     for(const auto&p:root.at("entries")) {
         if(epoch!=session.load())return;
-        if(!InputsValid(p)){++rejected;continue;}
+        if(!p.contains("referenceConfiguration")||p.at("referenceConfiguration")!=reference||!InputsValid(p)){++rejected;continue;}
         std::scoped_lock lock(mutex);if(epoch!=session.load())return;profiles.try_emplace(Key(p),p);++accepted;
     }
     logger::info("[height cache] loaded={} staleOrInvalid={} (current foot and actor context still required)",accepted,rejected);
@@ -152,6 +170,8 @@ void ObserveFoot(const Json&d){
 }
 void Publish(Json p){
     if(p.value("heightSession",std::uint64_t{})!=session.load())return;
+    const auto reference=ReferenceStamp();if(reference.empty())return;
+    p["referenceConfiguration"]=reference;
     p["algorithm"]=kAlgorithm;
     if(!FormatValid(p))return;
     // Source hashes are checked once when restoring persisted entries, and are
