@@ -15,6 +15,10 @@ constexpr auto basePath="Data/SKSE/Plugins/VanityUBEHeelAdapter.json";
 constexpr auto userPath="Data/SKSE/Plugins/VanityUBEHeelAdapter.user.json";
 std::mutex mutex,inputMutex;
 std::optional<Json> pending,status;
+std::optional<ForcedReload> forcedReload;
+std::atomic<std::uint64_t> reloadRequested{0};
+std::uint64_t reloadFinished{0}; // mutex protects this and the receipt
+Json reloadReceipt={{"requestId",0},{"state","not-requested"}};
 std::optional<cp::Paths> paths;
 bool userWasPresent=false;
 std::string lastStatus,acceptedEffective;
@@ -83,7 +87,7 @@ class Worker {
         Json lastReport;std::optional<Input> current;
         const auto processToken=std::to_string(Now())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         Json history={{"schema",1},{"coalesced",true},{"semantics","submitted control states, not proof of visible geometry; intermediate updates may coalesce"},{"entries",Json::array()}};
-        Json inventory={{"schema",1},{"generatorVersion","0.16.1"},{"entries",Json::object()}};
+        Json inventory={{"schema",1},{"generatorVersion","0.17.0"},{"entries",Json::object()}};
         bool loadedInventory=false;
         while(!stop.stop_requested()){
             bool notify=false;
@@ -91,12 +95,22 @@ class Worker {
                 auto next=Candidate();const bool fresh=debounce.Ready(next.stamp);
                 const bool stable=debounce.repeats>=2&&debounce.emitted==next.stamp;
                 {std::scoped_lock lock(mutex);
-                    if(stable&&acceptedEffective==next.stamp){acceptedRead=next.receipt;acceptedRead["revision"]=acceptedRevision;pending.reset();}
+                    const auto explicitRequest=reloadRequested.load();
+                    if(stable&&explicitRequest>reloadFinished) {
+                        forcedReload=ForcedReload{next.effective,explicitRequest};
+                        reloadReceipt={{"requestId",explicitRequest},{"state","validated-awaiting-main-thread"},
+                            {"effectiveFingerprint",Fingerprint(next.stamp)}};
+                        pending.reset();notify=true;
+                    }
+                    else if(stable&&acceptedEffective==next.stamp){acceptedRead=next.receipt;acceptedRead["revision"]=acceptedRevision;pending.reset();}
                     else if(stable&&(fresh||!pending)){pending=next.effective;notify=true;}
                 }
                 current=std::move(next);lastError.clear();
             }catch(const std::exception&e){
-                debounce={};{std::scoped_lock lock(mutex);pending.reset();}
+                debounce={};{std::scoped_lock lock(mutex);pending.reset();forcedReload.reset();
+                    const auto request=reloadRequested.load();
+                    if(request>reloadFinished){reloadFinished=request;reloadReceipt={{"requestId",request},{"state","rejected"},{"error",e.what()}};}}
+
                 if(lastError!=e.what()){lastError=e.what();logger::warn("[config reload] rejected; keeping last good config: {}",lastError);}
             }
             if(notify)if(auto fn=callback.load())fn();
@@ -109,7 +123,7 @@ class Worker {
                     catch(...){/* diagnostic inventory is not authority */}}
                 Json ack;std::string effective;std::optional<Json> snapshot;
                 {std::scoped_lock lock(mutex);ack=acceptedRead;effective=acceptedEffective;snapshot=std::move(status);status.reset();}
-                Json receipt={{"schema",1},{"generatorVersion","0.16.1"},{"processToken",processToken},{"heartbeatUnixMs",Now()},
+                Json receipt={{"schema",1},{"generatorVersion","0.17.0"},{"processToken",processToken},{"heartbeatUnixMs",Now()},
                     {"basePath",cp::Text(locations.base)},{"userPath",cp::Text(locations.user)},{"outputDirectory",cp::Text(locations.output)},
                     {"virtualBasePath",cp::Text(locations.virtualBase)},{"virtualUserPath",cp::Text(locations.virtualUser)},
                     {"userPathMode",locations.userMode},{"fingerprintAlgorithm","fnv1a64"},{"accepted",ack},
@@ -117,6 +131,7 @@ class Worker {
                     {"error",lastError.empty()?Json(nullptr):Json(lastError)},
                     {"semantics","accepted confirms main-thread configuration, not morph submission or visible fit"}};
                 if(current)receipt["observed"]=current->receipt;
+                {std::scoped_lock lock(mutex);receipt["manualReload"]=reloadReceipt;}
                 try{Write(locations.output/"configuration-status.json",receipt);}
                 catch(const std::exception&e){logger::warn("[config receipt] write failed: {}",e.what());}
                 if(snapshot)lastReport=*snapshot;
@@ -151,6 +166,23 @@ void Acknowledge(const Json& effective,std::uint64_t revision){
     if(latestRead.value("effective",std::string{})==acceptedEffective){acceptedRead=latestRead;acceptedRead.erase("effective");acceptedRead["revision"]=revision;}
     else acceptedRead=Json::object();
     if(pending&&pending->dump()==acceptedEffective)pending.reset();
+}
+std::uint64_t RequestReload(){
+    const auto id=reloadRequested.fetch_add(1)+1;
+    {std::scoped_lock lock(mutex);reloadReceipt={{"requestId",id},{"state","read-requested"}};}
+    return id;
+}
+std::optional<ForcedReload> TakeForcedReload(){
+    std::scoped_lock lock(mutex);
+    if(!forcedReload||forcedReload->requestId!=reloadRequested.load()||forcedReload->requestId<=reloadFinished)return {};
+    auto out=std::move(forcedReload);forcedReload.reset();return out;
+}
+void AcknowledgeForcedReload(std::uint64_t requestId,std::uint64_t revision){
+    std::scoped_lock lock(mutex);
+    if(requestId!=reloadRequested.load())return;
+    reloadFinished=requestId;forcedReload.reset();
+    reloadReceipt={{"requestId",requestId},{"state","accepted-reapply-requested"},{"configurationRevision",revision},
+        {"semantics","configuration reread accepted; current scopes scheduled for repeated local submission, not visual proof"}};
 }
 void Status(Json snapshot){auto s=snapshot.dump();std::scoped_lock lock(mutex);if(lastStatus==s)return;lastStatus=std::move(s);status=std::move(snapshot);}
 }

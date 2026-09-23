@@ -319,7 +319,7 @@ void Visit(const api::VisualState001*state,void*){
     auto*player=RE::PlayerCharacter::GetSingleton();if(!player||state->actorFormID!=player->GetFormID())return;
     if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001))return;
     auto visuals=Visuals(*state);auto parts=racemenu::ScanPlayerBipedParts();auto live=MatchLive(visuals,parts);
-    Json report={{"schema",1},{"generatorVersion","0.16.1"},{"session",height_profiles::Session()},
+    Json report={{"schema",1},{"generatorVersion","0.17.0"},{"session",height_profiles::Session()},
         {"configurationRevision",configRevision},{"heelMax",HeelMax()},{"NoHeelMaximum",1.0},
         {"active",Bool("applyMorph",false)},{"visuals",Json::array()},{"decisions",Json::array()}};
     for(const auto&v:visuals){
@@ -383,6 +383,28 @@ bool Connect(){
     if(!listener)listener=svs->RegisterVisualStateChangedListener([](const api::VisualState001*,void*){Changed();foot_capture::RequestCapture();},nullptr);
     return listener!=0&&svs->IsReady();
 }
+// GLOB is an explicit, self-clearing vanilla console mailbox. No command-table
+// patching and no Papyrus/ConsoleUtil dependency. It is read only on game tasks.
+RE::TESGlobal* ReloadMailbox(){
+    auto* data=RE::TESDataHandler::GetSingleton();
+    return data?data->LookupForm<RE::TESGlobal>(0x800,"VanityUBEHeelAdapter.Commands.esp"):nullptr;
+}
+void ConsoleMessage(const std::string& message){
+    logger::info("[manual reload] {}",message);
+    if(auto* console=RE::ConsoleLog::GetSingleton())console->Print("%s",message.c_str());
+}
+unsigned forcedPasses=0;
+std::chrono::steady_clock::time_point nextForcedPass{};
+void PollReloadMailbox(){
+    auto* command=ReloadMailbox();if(!command||command->value==0.0F)return;
+    const auto value=command->value;command->value=0.0F;
+    if(value==1.0F){
+        const auto id=runtime_files::RequestReload();
+        ConsoleMessage(std::format("VHA reload {} queued. Close the console to resume game tasks.",id));
+    }else if(value==2.0F){
+        ConsoleMessage(std::format("VHA 0.17.0 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
+    }else ConsoleMessage("VHA: set VHA_Reload to 1 = reread + reapply; to 2 = status. Other values ignored.");
+}
 void QueueSnapshot(){
     if(!running.load()||queued.exchange(true))return;
     auto* tasks=SKSE::GetTaskInterface();if(!tasks){queued.store(false);return;}
@@ -390,9 +412,23 @@ void QueueSnapshot(){
     tasks->AddTask([epoch]{
         queued.store(false);if(!running.load()||epoch!=height_profiles::Session())return;
         std::unique_lock lock(updateMutex,std::try_to_lock);if(!lock.owns_lock())return;
-        try{if(auto next=runtime_files::TakePending()){
+        try{
+            PollReloadMailbox();
+            if(auto forced=runtime_files::TakeForcedReload()){
+                // Deliberately unconditional: equal configuration still clears the
+                // managed-state dedupe and requests fresh live targets.
+                AcceptConfiguration(std::move(forced->effective));
+                runtime_files::Acknowledge(config,configRevision);
+                runtime_files::AcknowledgeForcedReload(forced->requestId,configRevision);
+                forcedPasses=3;nextForcedPass=std::chrono::steady_clock::now();
+                ConsoleMessage(std::format("VHA reload {} accepted as revision {}; local reapply scheduled.",forced->requestId,configRevision));
+            }else if(auto next=runtime_files::TakePending()){
                 if(*next!=config)AcceptConfiguration(std::move(*next));
                 runtime_files::Acknowledge(config,configRevision);
+            }
+            if(forcedPasses&&std::chrono::steady_clock::now()>=nextForcedPass){
+                dirty.fetch_add(1);--forcedPasses;
+                nextForcedPass=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
             }
             if(!Connect()||!racemenu::Available())return;auto*player=RE::PlayerCharacter::GetSingleton();
             if(player)svs->VisitActorVisualState(player,Visit,nullptr);
@@ -427,6 +463,8 @@ void AcceptConfiguration(Json next){
 }
 void Load(){
     std::unique_lock lock(updateMutex);
+    forcedPasses=0;
+    if(auto* command=ReloadMailbox())command->value=0.0F;
     if(auto next=runtime_files::ReadInitial())config=std::move(*next);
     else if(config.empty()){config={{"applyMorph",false},{"automaticHeight",false},{"heelMax",2.0}};}
     config_state::Set(config);++configRevision;

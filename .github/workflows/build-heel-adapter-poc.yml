@@ -61,6 +61,7 @@ jobs:
             ./"$test"
           done
           python3 plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
+          python3 plugins/VanityUBEHeelAdapter/tests/test_offline.py
 
   build:
     needs: core-tests
@@ -113,6 +114,8 @@ jobs:
           }
           python plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python plugins/VanityUBEHeelAdapter/tests/test_offline.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build adapter
         shell: pwsh
         run: |
@@ -129,10 +132,16 @@ jobs:
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
           Copy-Item 'plugins/VanityUBEHeelAdapter/RELEASE-0.16.0.md' 'artifact/RELEASE-0.16.0.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/height_editor.py' 'artifact/tools/height_editor.py'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/tools/vha_offline.py' 'artifact/tools/vha_offline.py'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/tools/offline' 'artifact/tools/offline' -Recurse
+          python plugins/VanityUBEHeelAdapter/tools/build_command_plugin.py --out artifact/VanityUBEHeelAdapter.Commands.esp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item 'plugins/VanityUBEHeelAdapter/OFFLINE-0.17.0.md' 'artifact/OFFLINE-0.17.0.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/OFFLINE-0.17.0.zh-CN.md' 'artifact/OFFLINE-0.17.0.zh-CN.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/FIXES-0.16.1.md' 'artifact/FIXES-0.16.1.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
           @{
-            version = '0.16.1'
+            version = '0.17.0'
             commit = $env:GITHUB_SHA
             dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'

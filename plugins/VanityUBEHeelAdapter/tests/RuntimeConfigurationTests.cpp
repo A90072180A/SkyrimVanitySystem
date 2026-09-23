@@ -101,6 +101,31 @@ int main(){const auto old=std::filesystem::current_path();auto dir=std::filesyst
     auto heartbeat=readReceipt().at("heartbeatUnixMs").get<std::uint64_t>();
     Check(wait([&]{return readReceipt().at("heartbeatUnixMs").get<std::uint64_t>()>heartbeat;}));
     Check(readReceipt().at("fingerprintAlgorithm")=="fnv1a64");
+    // Exercise actual explicit-reload delivery without starting a second worker.
+    // A request with identical content must still be delivered for forced reapply.
+    auto request=[&]{return rf::RequestReload();};
+    const auto firstRequest=request();std::optional<rf::ForcedReload> forced;
+    Check(wait([&]{forced=rf::TakeForcedReload();return forced.has_value();}));
+    Check(forced->requestId==firstRequest);Check(forced->effective==*v);
+    // Taking is not an ACK; a missed game task is retried rather than forgotten.
+    forced.reset();Check(wait([&]{forced=rf::TakeForcedReload();return forced.has_value();}));
+    Check(forced->requestId==firstRequest);
+    rf::Acknowledge(forced->effective,++revision);rf::AcknowledgeForcedReload(firstRequest,revision);
+    Check(wait([&]{return readReceipt().at("manualReload").at("state")=="accepted-reapply-requested";}));
+    Check(!rf::TakeForcedReload());
+    atomic(glass);const auto secondRequest=request();
+    Check(wait([&]{forced=rf::TakeForcedReload();return forced&&forced->requestId==secondRequest;}));
+    Check(forced->effective.at("manualPairs").at(0).at("Heel")==1.1);
+    rf::Acknowledge(forced->effective,++revision);rf::AcknowledgeForcedReload(secondRequest,revision);
+    atomic("{ malformed");const auto thirdRequest=request();
+    Check(wait([&]{auto r=readReceipt().at("manualReload");return r.at("requestId")==thirdRequest&&r.at("state")=="rejected";}));
+    Check(!rf::TakeForcedReload());
+    Check(readReceipt().at("accepted").at("revision")==revision);
+    atomic(glass);const auto fourthRequest=request();
+    Check(wait([&]{forced=rf::TakeForcedReload();return forced&&forced->requestId==fourthRequest;}));
+    rf::Acknowledge(forced->effective,++revision);rf::AcknowledgeForcedReload(fourthRequest,revision);
+    Check(wait([&]{return readReceipt().at("manualReload").at("configurationRevision")==revision;}));
+
   }
   std::filesystem::current_path(dir);
   // Native Windows HANDLE path resolution is exercised by Discover on Unicode
