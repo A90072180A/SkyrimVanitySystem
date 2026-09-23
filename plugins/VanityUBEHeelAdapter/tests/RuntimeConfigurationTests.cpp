@@ -27,7 +27,85 @@ int main(){const auto old=std::filesystem::current_path();auto dir=std::filesyst
     Check(wait([]{return std::filesystem::exists("Data/SKSE/Plugins/VanityUBEHeelAdapter/observed-items.json");}));
     Check(!std::filesystem::exists("Data/SKSE/Plugins/VanityUBEHeelAdapter/runtime-state.json.tmp"));
   }
-  std::cout<<checks<<" actual reload/atomic report checks passed\n";
+
+  // Model MO2's immutable virtual aliases: startup virtual files remain unchanged,
+  // but the native resolver has identified a distinct physical backing path.
+  // Tests use the actual production worker and I/O after path discovery, not a
+  // mock watcher. Actual usvfs injection / Skyrim task timing are not simulated.
+  const auto physical=dir/"physical-output";
+  const auto overlay=physical/"VanityUBEHeelAdapter.user.json";
+  const auto physicalBase=dir/"base-mod"/"VanityUBEHeelAdapter.json";
+  std::filesystem::create_directories(physical);
+  std::filesystem::create_directories(physicalBase.parent_path());
+  {std::ofstream f(physicalBase);f<<R"({"applyMorph":true,"automaticHeight":true})";}
+  rf::cp::Paths routed{physicalBase,overlay,physical/"VanityUBEHeelAdapter",
+      dir/rf::basePath,dir/"unmapped-user.json","output-sibling-overlay"};
+  {std::scoped_lock lock(rf::inputMutex);rf::paths=routed;rf::userWasPresent=false;}
+  {std::scoped_lock lock(rf::mutex);rf::pending.reset();rf::acceptedRead=Json::object();rf::acceptedEffective.clear();}
+  auto initial2=rf::ReadInitial();Check(initial2&&initial2->at("heelMax")==2);
+  rf::Acknowledge(*initial2,10);
+  auto readReceipt=[&](){std::ifstream f(routed.output/"configuration-status.json");return Json::parse(f);};
+  auto atomic=[&](const std::string& bytes){auto tmp=overlay;tmp+=".editor.tmp";{std::ofstream f(tmp,std::ios::binary);f<<bytes;}
+#ifdef _WIN32
+    Check(::MoveFileExW(tmp.c_str(),overlay.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0);
+#else
+    std::filesystem::rename(tmp,overlay);
+#endif
+  };
+  const std::string glass=R"({"schema":1,"pairs":[{"stocking":"Sock.esp|00000001","footwear":"Glass.esp|00000002","mode":"manual","NoHeel":0,"Heel":1.1}]})";
+  std::uint64_t revision=10;
+  auto accept=[&](const Json& next){rf::Acknowledge(next,++revision);};
+  auto wait=[&](auto test){for(unsigned i=0;i<100;++i){try{if(test())return true;}catch(const std::exception&){}std::this_thread::sleep_for(std::chrono::milliseconds(50));}return false;};
+  auto change=[&](const std::string& bytes,double heel){atomic(bytes);std::optional<Json> value;
+    Check(wait([&]{value=rf::TakePending();return value.has_value();}));Check(value->at("manualPairs").at(0).at("Heel")==heel);
+    // File observation / queuing alone must never be called main-thread acceptance.
+    Check(readReceipt().at("accepted").value("userFingerprint",Json(nullptr))!=rf::Fingerprint(bytes));
+    accept(*value);Check(wait([&]{auto c=readReceipt();return c.at("accepted").value("userFingerprint",Json(nullptr))==rf::Fingerprint(bytes)&&c.at("accepted").at("revision")==revision;}));
+  };
+  {
+    rf::Worker worker;
+    Check(wait([&]{return readReceipt().at("accepted").at("revision")==10;}));
+    Check(readReceipt().at("userPath")==rf::cp::Text(overlay));
+    // Overlay did not exist at process start. Its later creation is read from
+    // the resolved output sibling even while the virtual alias stays absent.
+    Check(!std::filesystem::exists(routed.virtualUser));change(glass,1.1);
+    Check(!std::filesystem::exists(routed.virtualUser));
+    auto low=glass;low.replace(low.find("1.1"),3,"0.9");
+    const auto originalTime=std::filesystem::last_write_time(overlay);atomic(low);
+    std::filesystem::last_write_time(overlay,originalTime);Check(glass.size()==low.size());
+    std::optional<Json> v;Check(wait([&]{v=rf::TakePending();return v.has_value();}));Check(v->at("manualPairs").at(0).at("Heel")==.9);accept(*v);
+    Check(wait([&]{return readReceipt().at("accepted").value("userFingerprint",Json(nullptr))==rf::Fingerprint(low);}));
+    // Another subsystem changing the working directory cannot redirect polling.
+    const auto away=dir/"different-cwd";std::filesystem::create_directory(away);std::filesystem::current_path(away);
+    change(glass,1.1);
+    for(const auto& invalid:std::vector<std::string>{"{",R"({"pairs":[{"stocking":"Sock.esp|00000001","footwear":"Glass.esp|00000002","NoHeel":1.1,"Heel":0}]})"}){
+        atomic(invalid);Check(wait([&]{return readReceipt().at("state")=="rejected";}));Check(!rf::TakePending());
+        Check(readReceipt().at("accepted").value("userFingerprint",Json(nullptr))==rf::Fingerprint(glass));}
+    atomic(glass);Check(wait([&]{return readReceipt().at("state")=="accepted";}));
+    // A transient disappearance is not interpreted as removing all overrides.
+    std::filesystem::remove(overlay);Check(wait([&]{return readReceipt().at("state")=="rejected";}));Check(!rf::TakePending());
+    atomic("{}");Check(wait([&]{v=rf::TakePending();return v.has_value();}));Check(!v->contains("manualPairs"));accept(*v);
+    Check(wait([&]{return readReceipt().at("accepted").value("userFingerprint",Json(nullptr))==rf::Fingerprint("{}");}));
+    Check(!std::filesystem::exists(routed.output/"configuration-status.json.tmp"));
+    auto heartbeat=readReceipt().at("heartbeatUnixMs").get<std::uint64_t>();
+    Check(wait([&]{return readReceipt().at("heartbeatUnixMs").get<std::uint64_t>()>heartbeat;}));
+    Check(readReceipt().at("fingerprintAlgorithm")=="fnv1a64");
+  }
+  std::filesystem::current_path(dir);
+  // Native Windows HANDLE path resolution is exercised by Discover on Unicode
+  // paths; on POSIX canonical paths are tested instead. Never writes an overlay.
+  auto nativeRoot=dir/std::filesystem::path(u8"native-\u8DEF\u5F84");
+  auto base=nativeRoot/rf::basePath;std::filesystem::create_directories(base.parent_path());
+  {std::ofstream f(base);f<<"{}";}
+  auto resolved=rf::cp::Discover(nativeRoot);
+  Check(std::filesystem::equivalent(resolved.base,base));Check(resolved.user.is_absolute());
+  Check(!std::filesystem::exists(resolved.user));Check(resolved.userMode=="output-sibling-overlay");
+  {std::ofstream f(resolved.user);f<<"{}";}
+  auto resolved2=rf::cp::Discover(nativeRoot);Check(std::filesystem::equivalent(resolved2.user,resolved.user));
+  Check(resolved2.userMode=="existing-winning-overlay");
+  for(const auto& file:std::filesystem::directory_iterator(resolved.output))Check(file.path().extension()!=".tmp");
+
+  std::cout<<checks<<" actual reload/atomic report/routing/receipt checks passed\n";
  }catch(const std::exception&e){std::cerr<<e.what()<<'\n';std::filesystem::current_path(old);return 1;}
  std::filesystem::current_path(old);std::filesystem::remove_all(dir);return 0;
 }

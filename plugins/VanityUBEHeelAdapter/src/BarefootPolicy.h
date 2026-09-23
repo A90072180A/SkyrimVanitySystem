@@ -11,7 +11,7 @@ struct Evidence {
     bool enabled{true};
     bool snapshotValid{};
     std::size_t declaredFootwear{}, liveFootwear{};
-    bool realFootwearWorn{};
+    bool realFootwearWorn{}; // diagnostic metadata only; not a rendered-shoe proof
     bool activeSkinPart{}, skinAddonConfirmed{}, expectedBareFeetModel{};
     bool currentSkinnedGeometry{};
 };
@@ -21,9 +21,9 @@ inline std::string_view Decision(const Evidence& e) {
     if (e.liveFootwear > 1) return "ambiguous-visible-footwear";
     if (e.liveFootwear == 1) return "visible-footwear";
     // Missing BODYTRI / failed matching must not turn an advertised shoe into
-    // naked feet. Actual worn shoes also block this deliberately narrow fallback.
+    // naked feet. GetWornArmor can report the skin/underlying item; only the
+    // positively verified current skin geometry below authorizes barefoot.
     if (e.declaredFootwear) return "unresolved-visible-footwear";
-    if (e.realFootwearWorn) return "real-footwear-still-worn";
     if (!e.activeSkinPart) return "bare-skin-part-unconfirmed";
     if (!e.skinAddonConfirmed) return "bare-skin-addon-unconfirmed";
     if (!e.expectedBareFeetModel) return "bare-foot-model-unconfirmed";

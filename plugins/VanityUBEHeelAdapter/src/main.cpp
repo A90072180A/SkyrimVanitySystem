@@ -229,6 +229,7 @@ std::optional<Plan> Automatic(const Live&stock,const Live&shoe,const std::string
 struct BarefootObservation {
     bool ready{};
     std::string decision,signature;
+    Json evidence;
 };
 BarefootObservation ObserveBarefoot(RE::Actor* player,const api::VisualState001& state,
     const std::vector<Visual>& visuals,const std::vector<racemenu::BipedPartRecord>& parts,
@@ -250,12 +251,13 @@ BarefootObservation ObserveBarefoot(RE::Actor* player,const api::VisualState001&
         }
     }
     BarefootObservation out;
-    RE::FormID skinID=0,addonID=0;
+    RE::FormID skinID=0,addonID=0,wornID=0;
     std::uintptr_t cloneID=0;
     std::string model,geometryStamp;
     auto* skin=player->GetSkin();
     auto* worn=player->GetWornArmor(RE::BGSBipedObjectForm::BipedObjectSlot::kFeet);
     evidence.realFootwearWorn=worn!=nullptr;
+    if(worn)wornID=worn->GetFormID();
     if(skin)skinID=skin->GetFormID();
     const racemenu::BipedPartRecord* active=nullptr;
     unsigned activeCount=0;
@@ -291,8 +293,14 @@ BarefootObservation ObserveBarefoot(RE::Actor* player,const api::VisualState001&
     const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     out.ready=barefootSettler.Ready(out.decision,out.signature,static_cast<std::uint64_t>(now));
     if(!out.ready&&out.decision=="confirmed-barefoot")out.decision="barefoot-waiting-for-stable-state";
-    if(liveShoes==0)DecisionLog("footwear-state",std::format("footwear={} declared={} realWorn={} skin={:08X} addon={:08X} model='{}'",
-        out.decision,evidence.declaredFootwear,evidence.realFootwearWorn,skinID,addonID,model));
+    out.evidence={{"snapshotValid",evidence.snapshotValid},{"declaredFootwear",evidence.declaredFootwear},
+        {"liveFootwear",evidence.liveFootwear},{"wornQueryID",Stable(wornID)},{"wornQueryIsSkin",wornID!=0&&wornID==skinID},
+        {"skinID",Stable(skinID)},{"activeSkinPart",evidence.activeSkinPart},{"skinAddonConfirmed",evidence.skinAddonConfirmed},
+        {"expectedBareFeetModel",evidence.expectedBareFeetModel},{"currentSkinnedGeometry",evidence.currentSkinnedGeometry},
+        {"addonID",Stable(addonID)},{"model",model},{"stable",out.ready}};
+    if(liveShoes==0)DecisionLog("footwear-state",std::format("footwear={} declared={} wornQuery={:08X} queryIsSkin={} skin={:08X} addon={:08X} model='{}' activeSkin={} skinAddon={} expectedModel={} skinned={}",
+        out.decision,evidence.declaredFootwear,wornID,wornID!=0&&wornID==skinID,skinID,addonID,model,
+        evidence.activeSkinPart,evidence.skinAddonConfirmed,evidence.expectedBareFeetModel,evidence.currentSkinnedGeometry));
     else lastDecision.erase("footwear-state");
     return out;
 }
@@ -311,7 +319,7 @@ void Visit(const api::VisualState001*state,void*){
     auto*player=RE::PlayerCharacter::GetSingleton();if(!player||state->actorFormID!=player->GetFormID())return;
     if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001))return;
     auto visuals=Visuals(*state);auto parts=racemenu::ScanPlayerBipedParts();auto live=MatchLive(visuals,parts);
-    Json report={{"schema",1},{"generatorVersion","0.16.0"},{"session",height_profiles::Session()},
+    Json report={{"schema",1},{"generatorVersion","0.16.1"},{"session",height_profiles::Session()},
         {"configurationRevision",configRevision},{"heelMax",HeelMax()},{"NoHeelMaximum",1.0},
         {"active",Bool("applyMorph",false)},{"visuals",Json::array()},{"decisions",Json::array()}};
     for(const auto&v:visuals){
@@ -331,6 +339,7 @@ void Visit(const api::VisualState001*state,void*){
     if(context!=measurementContext){measurementContext=context;foot_capture::RequestCapture();}
     if(stockings.empty()){barefootSettler.Reset();report["state"]="no-live-stocking";finish();return;}
     const auto barefoot=ObserveBarefoot(player,*state,visuals,parts,shoes.size(),context);
+    report["barefootEvidence"]=barefoot.evidence;
     report["state"]=shoes.size()==1?"one-live-footwear":barefoot.decision;
     if(shoes.size()==1||barefoot.ready)for(const auto*stock:stockings){
         const auto cap=height_profiles::RequestCapability(stock->tri);
@@ -381,7 +390,10 @@ void QueueSnapshot(){
     tasks->AddTask([epoch]{
         queued.store(false);if(!running.load()||epoch!=height_profiles::Session())return;
         std::unique_lock lock(updateMutex,std::try_to_lock);if(!lock.owns_lock())return;
-        try{if(auto next=runtime_files::TakePending();next&&*next!=config)AcceptConfiguration(std::move(*next));
+        try{if(auto next=runtime_files::TakePending()){
+                if(*next!=config)AcceptConfiguration(std::move(*next));
+                runtime_files::Acknowledge(config,configRevision);
+            }
             if(!Connect()||!racemenu::Available())return;auto*player=RE::PlayerCharacter::GetSingleton();
             if(player)svs->VisitActorVisualState(player,Visit,nullptr);
         }catch(const std::exception&e){logger::warn("[height runtime] safe evaluation failure: {}",e.what());}
@@ -418,6 +430,7 @@ void Load(){
     if(auto next=runtime_files::ReadInitial())config=std::move(*next);
     else if(config.empty()){config={{"applyMorph",false},{"automaticHeight",false},{"heelMax",2.0}};}
     config_state::Set(config);++configRevision;
+    runtime_files::Acknowledge(config,configRevision);
     height_profiles::BeginSession();
     if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});
     applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();racemenu::ResetAttachmentCache();

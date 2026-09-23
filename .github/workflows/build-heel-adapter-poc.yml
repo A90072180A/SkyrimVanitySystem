@@ -129,10 +129,10 @@ jobs:
           Copy-Item 'plugins/VanityUBEHeelAdapter/config/VanityUBEHeelAdapter.json' 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.json'
           Copy-Item 'plugins/VanityUBEHeelAdapter/RELEASE-0.16.0.md' 'artifact/RELEASE-0.16.0.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/height_editor.py' 'artifact/tools/height_editor.py'
-          Copy-Item 'plugins/VanityUBEHeelAdapter/BAREFOOT-0.15.1.md' 'artifact/BAREFOOT-0.15.1.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/FIXES-0.16.1.md' 'artifact/FIXES-0.16.1.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
           @{
-            version = '0.16.0'
+            version = '0.16.1'
             commit = $env:GITHUB_SHA
             dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'

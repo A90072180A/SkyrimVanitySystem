@@ -28,7 +28,7 @@ int main(){
         e.activeSkinPart=bits&8;e.skinAddonConfirmed=bits&16;
         e.expectedBareFeetModel=bits&32;e.currentSkinnedGeometry=bits&64;
         e.declaredFootwear=advertised;e.liveFootwear=live;
-        const bool expected=e.enabled&&e.snapshotValid&&!e.realFootwearWorn&&e.activeSkinPart&&
+        const bool expected=e.enabled&&e.snapshotValid&&e.activeSkinPart&&
             e.skinAddonConfirmed&&e.expectedBareFeetModel&&e.currentSkinnedGeometry&&!advertised&&!live;
         Check((bf::Decision(e)=="confirmed-barefoot")==expected);
     }
@@ -37,7 +37,9 @@ int main(){
     auto shoe=bare;shoe.liveFootwear=1;Check(bf::Decision(shoe)=="visible-footwear");
     shoe.liveFootwear=2;Check(bf::Decision(shoe)=="ambiguous-visible-footwear");
     shoe=bare;shoe.declaredFootwear=1;Check(bf::Decision(shoe)=="unresolved-visible-footwear");
-    shoe=bare;shoe.realFootwearWorn=true;Check(bf::Decision(shoe)=="real-footwear-still-worn");
+    shoe=bare;shoe.realFootwearWorn=true;Check(bf::Decision(shoe)=="confirmed-barefoot");
+    shoe.expectedBareFeetModel=false;Check(bf::Decision(shoe)=="bare-foot-model-unconfirmed");
+    shoe=bare;shoe.realFootwearWorn=true;shoe.declaredFootwear=1;Check(bf::Decision(shoe)=="unresolved-visible-footwear");
     bf::Settler gate;
     Check(!gate.Ready("confirmed-barefoot","skin-A",0));
     Check(!gate.Ready("confirmed-barefoot","skin-A",249));
