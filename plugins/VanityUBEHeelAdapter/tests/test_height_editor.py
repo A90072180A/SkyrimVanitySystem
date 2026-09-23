@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 import time
+from unittest import mock
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('editor',Path(__file__).parents[1]/'tools/height_editor.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -23,7 +24,7 @@ class Tests(unittest.TestCase):
   self.assertFalse(e.path.exists())
  def test_ignore_auto_mark(self):
   e=m.Editor(self.path);e.mark('Sock.esp|00000001','ignore');e.set_pair('Sock.esp|00000001','<barefoot>',0,0,mode='ignore');e.save()
-  e=m.Editor(self.path);e.mark('Sock.esp|00000001','auto');e.set_pair('Sock.esp|00000001','<barefoot>',0,0,mode='auto');e.save()
+  e=m.Editor(self.path);e.mark('Sock.esp|00000001','auto');e.set_pair('Sock.esp|00000001','<barefoot>',0,0,'','auto');e.save()
   self.assertEqual(e.user['items'],[]);self.assertEqual(e.user['pairs'],[])
  def test_approval_binding(self):
   e=m.Editor(self.path);e.output.mkdir()
@@ -64,6 +65,18 @@ class Tests(unittest.TestCase):
   self.assertFalse(m.same_path(actual,actual.with_name('different.json')))
   if m.os.name=='nt':
    self.assertTrue(m.same_path(actual,Path('\\\\?\\'+str(actual.resolve()))))
+ def test_reader_retries_only_io_not_corrupt_json(self):
+  path=self.path/'receipt.json';path.write_text('{"ok":true}')
+  real=Path.open
+  attempts=[]
+  def busy(p,*args,**kwargs):
+   attempts.append(1)
+   if len(attempts)==1:raise PermissionError("synthetic sharing violation")
+   return real(p,*args,**kwargs)
+  with mock.patch.object(Path,'open',busy):self.assertEqual(m.read_json(path),{'ok':True})
+  self.assertEqual(len(attempts),2)
+  path.write_text('')
+  with self.assertRaises(json.JSONDecodeError):m.read_json(path)
  def test_invalid_advertised_path(self):
   self.receipt(self.path/'arbitrary.txt')
   with self.assertRaises(ValueError):m.Editor(self.path)

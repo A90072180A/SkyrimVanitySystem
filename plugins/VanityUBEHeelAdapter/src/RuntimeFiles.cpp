@@ -36,8 +36,19 @@ std::string Read(const std::filesystem::path& path,bool optional,bool& present){
     if(!present){if(optional)return "{}";throw std::runtime_error("configuration missing: "+cp::Text(path));}
     const auto before=std::filesystem::last_write_time(path);const auto size=std::filesystem::file_size(path);
     if(size>1024*1024)throw std::runtime_error("configuration larger than 1 MiB");
+#ifdef _WIN32
+    // Do not block an editor's atomic rename while this fresh read handle lives.
+    cp::Handle h(::CreateFileW(path.c_str(),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,nullptr));
+    if(h.value==INVALID_HANDLE_VALUE)throw std::runtime_error("configuration read open failed: "+cp::Text(path)+" error="+std::to_string(::GetLastError()));
+    std::string s(static_cast<std::size_t>(size),'\0');DWORD received=0;
+    if(size&&(!::ReadFile(h.value,s.data(),static_cast<DWORD>(size),&received,nullptr)||received!=size))
+        throw std::runtime_error("configuration read failed or changed: "+cp::Text(path));
+#else
     std::ifstream f(path,std::ios::binary);if(!f)throw std::runtime_error("configuration unreadable: "+cp::Text(path));
     std::string s((std::istreambuf_iterator<char>(f)),{});
+#endif
     if(s.size()!=size||std::filesystem::last_write_time(path)!=before||std::filesystem::file_size(path)!=size)throw std::runtime_error("configuration changed during read");
     return s;
 }

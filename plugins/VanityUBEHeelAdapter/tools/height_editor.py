@@ -19,13 +19,24 @@ ID = re.compile(r"^.+\.(?:esp|esm|esl)\|[0-9a-f]{8}$", re.I)
 APPROVAL = ("context", "targetPositionFingerprint", "donorSourceFingerprint", "bodyTriFingerprint", "referenceConfiguration")
 
 def read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    if path.stat().st_size > 16 * 1024 * 1024:
-        raise ValueError(f"File too large: {path}")
     def no_constant(text: str) -> None:
         raise ValueError(f"Non-finite JSON value: {text}")
-    return json.loads(path.read_text(encoding="utf-8-sig"), parse_constant=no_constant)
+    # A brief sharing violation during a Windows atomic replace is not an empty
+    # JSON document. Reopen briefly; invalid JSON itself is never swallowed.
+    for attempt in range(4):
+        try:
+            with path.open("rb") as stream:
+                payload = stream.read(16 * 1024 * 1024 + 1)
+            break
+        except FileNotFoundError:
+            return default
+        except OSError:
+            if attempt == 3:
+                raise
+            time.sleep(0.01 * (attempt + 1))
+    if len(payload) > 16 * 1024 * 1024:
+        raise ValueError(f"File too large: {path}")
+    return json.loads(payload.decode("utf-8-sig"), parse_constant=no_constant)
 
 
 def controls(noheel: float, heel: float, maximum: float) -> None:

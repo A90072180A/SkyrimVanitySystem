@@ -10,6 +10,17 @@ std::atomic<unsigned> notices{0};void Notice(){++notices;}
 int main(){const auto old=std::filesystem::current_path();auto dir=std::filesystem::temp_directory_path()/std::format("vha-config-{}",std::chrono::steady_clock::now().time_since_epoch().count());
  std::filesystem::create_directories(dir);std::filesystem::current_path(dir);
  auto put=[](const char*path,const std::string&s){std::filesystem::create_directories(std::filesystem::path(path).parent_path());std::ofstream f(path,std::ios::binary|std::ios::trunc);f<<s;};
+ // Publication and an immediate reader can race with a Windows rename handle.
+ // Retry only bounded I/O failures; once bytes are read, empty/malformed JSON is
+ // a hard failure, not a reason to wait until a later report hides corruption.
+ auto readReport=[](const std::filesystem::path& path){
+    std::optional<std::string> bytes;
+    for(unsigned attempt=0;attempt<100&&!bytes;++attempt){
+        try{bool present=false;bytes=rf::Read(path,false,present);}
+        catch(const std::exception&){if(attempt==99)throw;std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+    }
+    return Json::parse(*bytes);
+ };
  try{
   put(rf::basePath,R"({"applyMorph":true,"automaticHeight":true})");auto initial=rf::ReadInitial();Check(initial&&initial->at("heelMax")==2.0);
   put(rf::userPath,R"({"schema":1,"settings":{"heelMax":3}})");Check(rf::ReadInitial()->at("heelMax")==3);
@@ -23,7 +34,7 @@ int main(){const auto old=std::filesystem::current_path();auto dir=std::filesyst
     put(rf::userPath,R"({"settings":{"heelMax":2.2}})");Check(wait([&]{return notices.load()>count;}));Check(rf::TakePending()->at("heelMax")==2.2);
     Json state={{"schema",1},{"visuals",Json::array({{{"armor","Sock.esp|00000001"},{"addon","Sock.esp|00000002"},{"model","test.nif"}}})},{"decisions",Json::array()}};
     rf::Status(state);Check(wait([]{return std::filesystem::exists("Data/SKSE/Plugins/VanityUBEHeelAdapter/runtime-state.json");}));
-    std::ifstream f("Data/SKSE/Plugins/VanityUBEHeelAdapter/runtime-state.json");auto report=Json::parse(f);Check(report["snapshotOnly"]==true);
+    auto report=readReport("Data/SKSE/Plugins/VanityUBEHeelAdapter/runtime-state.json");Check(report["snapshotOnly"]==true);
     Check(wait([]{return std::filesystem::exists("Data/SKSE/Plugins/VanityUBEHeelAdapter/observed-items.json");}));
     Check(!std::filesystem::exists("Data/SKSE/Plugins/VanityUBEHeelAdapter/runtime-state.json.tmp"));
   }
@@ -44,7 +55,7 @@ int main(){const auto old=std::filesystem::current_path();auto dir=std::filesyst
   {std::scoped_lock lock(rf::mutex);rf::pending.reset();rf::acceptedRead=Json::object();rf::acceptedEffective.clear();}
   auto initial2=rf::ReadInitial();Check(initial2&&initial2->at("heelMax")==2);
   rf::Acknowledge(*initial2,10);
-  auto readReceipt=[&](){std::ifstream f(routed.output/"configuration-status.json");return Json::parse(f);};
+  auto readReceipt=[&](){return readReport(routed.output/"configuration-status.json");};
   auto atomic=[&](const std::string& bytes){auto tmp=overlay;tmp+=".editor.tmp";{std::ofstream f(tmp,std::ios::binary);f<<bytes;}
 #ifdef _WIN32
     Check(::MoveFileExW(tmp.c_str(),overlay.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0);
@@ -106,6 +117,6 @@ int main(){const auto old=std::filesystem::current_path();auto dir=std::filesyst
   for(const auto& file:std::filesystem::directory_iterator(resolved.output))Check(file.path().extension()!=".tmp");
 
   std::cout<<checks<<" actual reload/atomic report/routing/receipt checks passed\n";
- }catch(const std::exception&e){std::cerr<<e.what()<<'\n';std::filesystem::current_path(old);return 1;}
+ }catch(const std::exception&e){std::cerr<<"after check "<<checks<<": "<<e.what()<<'\n';std::filesystem::current_path(old);return 1;}
  std::filesystem::current_path(old);std::filesystem::remove_all(dir);return 0;
 }

@@ -47,7 +47,9 @@ output probe is used only if no runtime report exists; it never overwrites a
 configuration and is removed immediately. Paths do not follow later CWD changes.
 
 Polling still uses bounded complete reads and fresh handles across atomic editor
-replacements. Content is compared even if size/mtime are unchanged. Two stable
+replacements. Windows read handles share delete/rename access, so polling does not
+lock out an editor replacement. Report readers retry brief I/O sharing failures;
+successfully read empty or malformed JSON is still rejected. Content is compared even if size/mtime are unchanged. Two stable
 valid observations precede a main-thread update. A malformed, partly written or
 now-missing previously present overlay preserves the last good configuration;
 write {} to intentionally clear it. Pending delivery is retried until the main
