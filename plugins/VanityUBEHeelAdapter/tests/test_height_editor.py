@@ -39,7 +39,7 @@ class Tests(unittest.TestCase):
   return data
  def test_resolved_new_overlay_and_real_ack(self):
   actual=self.path/'real-mod'/'VanityUBEHeelAdapter.user.json';self.receipt(actual)
-  e=m.Editor(self.path);self.assertEqual(e.path,actual);e.set_pair('Sock.esp|00000001','Glass.esp|00000002',0,1.1);e.save()
+  e=m.Editor(self.path);self.assertEqual(e.path,actual.resolve());e.set_pair('Sock.esp|00000001','Glass.esp|00000002',0,1.1);e.save()
   self.assertTrue(actual.exists());self.assertFalse((self.path/'VanityUBEHeelAdapter.user.json').exists())
   self.assertEqual(e.delivery()[0],'pending')
   accepted={"userPath":str(actual),"userFingerprint":m.fingerprint(actual.read_bytes()),"revision":7}
@@ -58,6 +58,12 @@ class Tests(unittest.TestCase):
   e=m.Editor(self.path);e.save();self.assertEqual(e.delivery()[0],'no-live-receipt')
   self.receipt(state="accepted",accepted={"userPath":str(e.path),"userFingerprint":"different","revision":100})
   self.assertEqual(e.delivery()[0],'pending')
+ def test_equivalent_physical_path_spellings(self):
+  actual=self.path/'actual'/'VanityUBEHeelAdapter.user.json';actual.parent.mkdir();actual.write_text('{}')
+  self.assertTrue(m.same_path(actual,actual.resolve()))
+  self.assertFalse(m.same_path(actual,actual.with_name('different.json')))
+  if m.os.name=='nt':
+   self.assertTrue(m.same_path(actual,Path('\\\\?\\'+str(actual.resolve()))))
  def test_invalid_advertised_path(self):
   self.receipt(self.path/'arbitrary.txt')
   with self.assertRaises(ValueError):m.Editor(self.path)
