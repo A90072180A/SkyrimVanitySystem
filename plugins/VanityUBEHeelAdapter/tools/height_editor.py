@@ -14,6 +14,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from vha_fileio import optional_bytes, ensure_directory, unlink_missing_ok
 
 ID = re.compile(r"^.+\.(?:esp|esm|esl)\|[0-9a-f]{8}$", re.I)
 APPROVAL = ("context", "targetPositionFingerprint", "donorSourceFingerprint", "bodyTriFingerprint", "referenceConfiguration")
@@ -87,7 +88,7 @@ class Editor:
         self.saved_fingerprint: str | None = None
         self.saved_time_ms = 0.0
         self.saved_process = self.connection.get("processToken") if recent(self.connection) else None
-        self.before = self.path.read_bytes() if self.path.exists() else None
+        self.before = optional_bytes(self.path)
         self.user = read_json(self.path, {"schema": 1, "settings": {}, "items": [], "pairs": []})
         if not isinstance(self.user, dict) or self.user.get("schema", 1) != 1:
             raise ValueError("Unsupported user configuration")
@@ -159,14 +160,14 @@ class Editor:
             raise RuntimeError(f"当前游戏监视的是 {connection['userPath']}，不是 {self.path}。请移除 --user-file 或选择游戏实际监视的文件。")
         self.saved_process = connection.get("processToken") if recent(connection) else None
         # A second editor's newer changes are never silently overwritten.
-        current = self.path.read_bytes() if self.path.exists() else None
+        current = optional_bytes(self.path)
         if current != self.before:
             raise RuntimeError("User file changed in another editor; reload before saving")
         for p in self.user.get("pairs", []):
             if p.get("mode", "manual") == "manual":
                 controls(float(p["NoHeel"]), float(p["Heel"]), self.maximum)
         payload = (json.dumps(self.user, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_directory(self.path.parent)
         if current is not None:
             self.path.with_suffix(self.path.suffix + ".bak").write_bytes(current)
         fd, name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
@@ -175,7 +176,7 @@ class Editor:
                 f.write(payload); f.flush(); os.fsync(f.fileno())
             os.replace(name, self.path)
         finally:
-            if os.path.exists(name): os.unlink(name)
+            unlink_missing_ok(Path(name))
         self.before = payload
         self.saved_fingerprint = fingerprint(payload)
         self.saved_time_ms = time.time() * 1000

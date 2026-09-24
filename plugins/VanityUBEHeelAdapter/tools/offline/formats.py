@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import math
 import mmap
+from vha_fileio import handle_stamp, file_stamp, readable_file
 from pathlib import Path, PureWindowsPath
 import struct
 import zlib
@@ -29,7 +30,10 @@ def file_hash(path: Path) -> str:
 
 def bounded_read(path: Path, limit: int = MAX_RESOURCE) -> bytes:
     with path.open('rb') as f:
+        before = handle_stamp(f)
         data = f.read(limit + 1)
+        if before != handle_stamp(f):
+            raise FormatError('resource-changed-during-read')
     if len(data) > limit:
         raise FormatError('resource-size-limit')
     return data
@@ -121,7 +125,7 @@ def active_plugins(data: Path, profile: Path) -> list[str]:
     if not enabled:
         raise FormatError('plugins.txt has no * enabled entries; select the actual MO2 SSE profile')
     implicit = ['Skyrim.esm', 'Update.esm', 'Dawnguard.esm', 'HearthFires.esm', 'Dragonborn.esm']
-    enabled = [n for n in implicit if (data/n).is_file()] + enabled
+    enabled = [n for n in implicit if readable_file(data/n)] + enabled
     names = {}
     for n in enabled:
         if PureWindowsPath(n).name != n or '\\' in n or '/' in n or Path(n).suffix.lower() not in ('.esp', '.esm', '.esl'):
@@ -129,7 +133,7 @@ def active_plugins(data: Path, profile: Path) -> list[str]:
         names.setdefault(n.casefold(), n)
     order_path = profile/'loadorder.txt'
     ordered = []
-    if order_path.exists():
+    if readable_file(order_path):
         for line in bounded_read(order_path, 1024*1024).decode('utf-8-sig').splitlines():
             n = line.strip().lstrip('*')
             if n.casefold() in names and n.casefold() not in {x.casefold() for x in ordered}:
@@ -139,73 +143,83 @@ def active_plugins(data: Path, profile: Path) -> list[str]:
     ordered += [n for n in names.values() if n.casefold() not in {x.casefold() for x in ordered}]
     return ordered
 
-def read_plugin(path: Path, canonical: dict[str, str]):
+def read_plugin(path: Path, canonical: dict[str, str], *, with_source=False):
     """Yield winning-record candidates; traverse only top-level ARMO/ARMA groups."""
-    if not 24 <= path.stat().st_size <= 2 * 1024**3:
-        raise FormatError('plugin-size-limit')
-    with path.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-        if data[:4] != b'TES4': raise FormatError('missing-TES4')
-        head_size, head_flags = struct.unpack_from('<II', data, 4)
-        if head_size > MAX_RESOURCE or head_size+24 > len(data): raise FormatError('bad-TES4-size')
-        masters = [text(v) for k,v in subrecords(bytes(data[24:24+head_size])) if k=='MAST']
-        if len(masters)>254 or len(set(x.casefold() for x in masters)) != len(masters):
-            raise FormatError('invalid-master-list')
-        origin = [canonical.get(x.casefold(), x) for x in masters] + [canonical.get(path.name.casefold(), path.name)]
-        def form(raw):
-            if raw == 0: return ''
-            idx, local = raw >> 24, raw & 0xffffff
-            if idx >= len(origin): raise FormatError('form-master-index-out-of-range')
-            return f'{origin[idx]}|{local:08X}'
-        result = []
-        def walk(start, end, depth=0):
-            if depth>32: raise FormatError('plugin-group-depth')
-            while start<end:
-                if end-start<24: raise FormatError('truncated-plugin-header')
-                sig = bytes(data[start:start+4]); size, flags = struct.unpack_from('<II',data,start+4)
-                if sig==b'GRUP':
-                    if size<24 or start+size>end: raise FormatError('invalid-GRUP-size')
-                    group_type=struct.unpack_from('<i',data,start+12)[0]
-                    if group_type != 0 or bytes(data[start+8:start+12]) in (b'ARMO',b'ARMA'):
-                        walk(start+24,start+size,depth+1)
-                    start += size; continue
-                if size>MAX_RESOURCE or start+24+size>end: raise FormatError('invalid-record-size')
-                if sig in (b'ARMO',b'ARMA'):
-                    raw=struct.unpack_from('<I',data,start+12)[0]
-                    payload=bytes(data[start+24:start+24+size])
-                    if flags & 0x40000:
-                        if len(payload)<4: raise FormatError('truncated-compressed-record')
-                        payload=decompress_zlib(payload[4:],struct.unpack_from('<I',payload)[0])
-                    fields={}
-                    for k,v in subrecords(payload): fields.setdefault(k,[]).append(v)
-                    def first(k,default=b''): return fields.get(k,[default])[0]
-                    def ref(k):
-                        v=first(k)
-                        if not v:return ''
-                        if len(v)!=4:raise FormatError('invalid-form-reference')
-                        return form(struct.unpack('<I',v)[0])
-                    def refs(k):
-                        values=[]
-                        for v in fields.get(k,[]):
+    with path.open('rb') as stream:
+        before = handle_stamp(stream)
+        if not 24 <= before[0] <= 2 * 1024**3:
+            raise FormatError('plugin-size-limit')
+        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            if data[:4] != b'TES4': raise FormatError('missing-TES4')
+            head_size, head_flags = struct.unpack_from('<II', data, 4)
+            if head_size > MAX_RESOURCE or head_size+24 > len(data): raise FormatError('bad-TES4-size')
+            masters = [text(v) for k,v in subrecords(bytes(data[24:24+head_size])) if k=='MAST']
+            if len(masters)>254 or len(set(x.casefold() for x in masters)) != len(masters):
+                raise FormatError('invalid-master-list')
+            origin = [canonical.get(x.casefold(), x) for x in masters] + [canonical.get(path.name.casefold(), path.name)]
+            def form(raw):
+                if raw == 0: return ''
+                idx, local = raw >> 24, raw & 0xffffff
+                if idx >= len(origin): raise FormatError('form-master-index-out-of-range')
+                return f'{origin[idx]}|{local:08X}'
+            result = []
+            def walk(start, end, depth=0):
+                if depth>32: raise FormatError('plugin-group-depth')
+                while start<end:
+                    if end-start<24: raise FormatError('truncated-plugin-header')
+                    sig = bytes(data[start:start+4]); size, flags = struct.unpack_from('<II',data,start+4)
+                    if sig==b'GRUP':
+                        if size<24 or start+size>end: raise FormatError('invalid-GRUP-size')
+                        group_type=struct.unpack_from('<i',data,start+12)[0]
+                        if group_type != 0 or bytes(data[start+8:start+12]) in (b'ARMO',b'ARMA'):
+                            walk(start+24,start+size,depth+1)
+                        start += size; continue
+                    if size>MAX_RESOURCE or start+24+size>end: raise FormatError('invalid-record-size')
+                    if sig in (b'ARMO',b'ARMA'):
+                        raw=struct.unpack_from('<I',data,start+12)[0]
+                        payload=bytes(data[start+24:start+24+size])
+                        if flags & 0x40000:
+                            if len(payload)<4: raise FormatError('truncated-compressed-record')
+                            payload=decompress_zlib(payload[4:],struct.unpack_from('<I',payload)[0])
+                        fields={}
+                        for k,v in subrecords(payload): fields.setdefault(k,[]).append(v)
+                        def first(k,default=b''): return fields.get(k,[default])[0]
+                        def ref(k):
+                            v=first(k)
+                            if not v:return ''
                             if len(v)!=4:raise FormatError('invalid-form-reference')
-                            x=form(struct.unpack('<I',v)[0])
-                            if x:values.append(x)
-                        return values
-                    slots=first('BOD2',first('BODT'))
-                    if slots and len(slots)<4:raise FormatError('truncated-slot-mask')
-                    name=text(first('EDID'))
-                    full=first('FULL')
-                    if not head_flags&0x80 and full: name=text(full) or name
-                    row={'id':form(raw),'type':sig.decode(),'deleted':bool(flags&0x20),'name':name,
-                         'editorID':text(first('EDID')),'owner':path.name,'slots':struct.unpack_from('<I',slots)[0] if slots else 0,
-                         'race':ref('RNAM'),'sourcePlugin':path.name}
-                    if sig==b'ARMO':row.update(addons=refs('MODL'),template=ref('TNAM'))
-                    else:
-                        d=first('DNAM')
-                        row.update(femaleModel=text(first('MOD3')),maleModel=text(first('MOD2')),
-                                   femaleWeightSlider=bool(len(d)>3 and d[3]&2),races=refs('MODL'))
-                    result.append(row)
-                start+=24+size
-        walk(24+head_size,len(data))
+                            return form(struct.unpack('<I',v)[0])
+                        def refs(k):
+                            values=[]
+                            for v in fields.get(k,[]):
+                                if len(v)!=4:raise FormatError('invalid-form-reference')
+                                x=form(struct.unpack('<I',v)[0])
+                                if x:values.append(x)
+                            return values
+                        slots=first('BOD2',first('BODT'))
+                        if slots and len(slots)<4:raise FormatError('truncated-slot-mask')
+                        name=text(first('EDID'))
+                        full=first('FULL')
+                        if not head_flags&0x80 and full: name=text(full) or name
+                        row={'id':form(raw),'type':sig.decode(),'deleted':bool(flags&0x20),'name':name,
+                             'editorID':text(first('EDID')),'owner':path.name,'slots':struct.unpack_from('<I',slots)[0] if slots else 0,
+                             'race':ref('RNAM'),'sourcePlugin':path.name}
+                        if sig==b'ARMO':row.update(addons=refs('MODL'),template=ref('TNAM'))
+                        else:
+                            d=first('DNAM')
+                            row.update(femaleModel=text(first('MOD3')),maleModel=text(first('MOD2')),
+                                       femaleWeightSlider=bool(len(d)>3 and d[3]&2),races=refs('MODL'))
+                        result.append(row)
+                    start+=24+size
+            walk(24+head_size,len(data))
+            # Hash exactly the mapped file that was parsed, not a second open.
+            digest = sha256(data)
+            if before != handle_stamp(stream):
+                raise FormatError('plugin-changed-during-scan')
+    if before != file_stamp(path):
+        raise FormatError('plugin-replaced-during-scan')
+    if with_source:
+        return masters,result,{'kind':'plugin','path':str(path),'sha256':digest}
     return masters,result
 
 def load_records(data: Path, plugins: list[str], progress=lambda s:None):
@@ -213,13 +227,19 @@ def load_records(data: Path, plugins: list[str], progress=lambda s:None):
     for i,name in enumerate(plugins):
         progress(f'插件 {i+1}/{len(plugins)}：{name}')
         path=data/name
-        before=(path.stat().st_size,path.stat().st_mtime_ns)
-        masters,rows=read_plugin(path,canonical)
+        try:
+            masters,rows,source=read_plugin(path,canonical,with_source=True)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"无法直接打开启用插件：{path}\n"
+                "请确认使用 MO2 的运行按钮启动 Python，Data 与当前 profile 属于同一游戏实例，"
+                "并检查 MO2 右侧 Data 中是否能看到该插件。不会跳过启用的主文件。\n"
+                "可运行 tools/vha_io_probe.py 收集 open/fstat/stat 的对照结果。"
+            ) from exc
         for m in masters:
             if m.casefold() not in seen:
                 raise FormatError(f'{name}: missing/late active master {m}; check plugins/loadorder')
-        sources.append({'kind':'plugin','path':str(path),'sha256':file_hash(path)})
-        if before != (path.stat().st_size,path.stat().st_mtime_ns):raise FormatError('plugin-changed-during-scan')
+        sources.append(source)
         for row in rows:
             key=row['id'].casefold()
             if key in records and records[key]['type']!=row['type']:raise FormatError('form-type-conflict')
@@ -397,8 +417,9 @@ def lz4_block(data: bytes, expected: int) -> bytes:
 class Archive:
     """SSE BSA 104/105 named archives; caller determines active load priority."""
     def __init__(self,path:Path):
-        self.path=path;self.entries={};self.stamp=(path.stat().st_size,path.stat().st_mtime_ns)
+        self.path=path;self.entries={}
         with path.open('rb') as f:
+            self.stamp=handle_stamp(f)
             header=f.read(36)
             if len(header)!=36 or header[:4]!=b'BSA\0':raise FormatError('unsupported-archive')
             version,offset,flags,folders,files,dirlen,namelen,_=struct.unpack('<8I',header[4:])
@@ -432,11 +453,14 @@ class Archive:
                 key=(folder+'\\'+text(name)).replace('/','\\').casefold().strip('\\')
                 if key in self.entries:raise FormatError('duplicate-BSA-resource')
                 self.entries[key]=(size,pos)
+            if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
     def read(self,key):
-        if self.stamp!=(self.path.stat().st_size,self.path.stat().st_mtime_ns):raise FormatError('BSA-changed-during-scan')
         size,pos=self.entries[key];length=size&0x3fffffff
         if length>MAX_RESOURCE:raise FormatError('BSA-resource-size-limit')
-        with self.path.open('rb') as f:f.seek(pos);raw=f.read(length)
+        with self.path.open('rb') as f:
+            if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
+            f.seek(pos);raw=f.read(length)
+            if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
         if len(raw)!=length:raise FormatError('truncated-BSA-resource')
         r=Reader(raw)
         if self.flags&0x100:r.take(r.u8())
@@ -454,8 +478,11 @@ class Resources:
     def read(self,model:str):
         key='meshes\\'+relative_model(model)
         loose=self.data.joinpath(*key.split('\\'))
-        if loose.is_file():
+        try:
             payload=bounded_read(loose)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        else:
             return payload,{'kind':'loose','resource':key,'path':str(loose),'sha256':sha256(payload)}
         for archive in reversed(self.archives):
             if key.casefold() in archive.entries:

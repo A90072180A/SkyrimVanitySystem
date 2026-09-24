@@ -13,21 +13,22 @@ import xml.etree.ElementTree as ET
 from .formats import (FormatError, Resources, active_plugins, load_records, bounded_read,
                       parse_nif, parse_tri, relative_model, file_hash, sha256)
 from . import geometry as geo
+from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline1'
+VERSION='0.17.0-offline2'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
 def atomic_json(path:Path,value,limit=64*1024*1024):
     payload=(json.dumps(value,ensure_ascii=False,allow_nan=False,indent=2)+'\n').encode('utf-8')
     if len(payload)>limit:raise ValueError('output exceeds size limit')
-    path.parent.mkdir(parents=True,exist_ok=True)
+    ensure_directory(path.parent)
     tmp=path.with_name(path.name+f'.{os.getpid()}.tmp')
     try:
         with tmp.open('wb') as f:f.write(payload);f.flush();os.fsync(f.fileno())
         os.replace(tmp,path)
     finally:
-        if tmp.exists():tmp.unlink()
+        unlink_missing_ok(tmp)
 
 def read_json(path):return json.loads(bounded_read(path).decode('utf-8-sig'),parse_constant=lambda x:(_ for _ in ()).throw(ValueError('nonfinite JSON')))
 
@@ -77,7 +78,7 @@ def preset_values(path:Path|None,name:str|None,weight:float):
 class Scanner:
     def __init__(self,data:Path,profile:Path,output:Path,weight=0.,preset:Path|None=None,
                  preset_name=None,archive_list:Path|None=None,race:str|None=None,progress=lambda s:None):
-        self.data,self.profile,self.output=data.resolve(),profile.resolve(),output.resolve()
+        self.data,self.profile,self.output=absolute_path(data),absolute_path(profile),absolute_path(output)
         if not math.isfinite(weight) or not 0<=weight<=100:raise ValueError('weight must be 0..100')
         self.weight=weight;self.progress=progress;self.race=race
         self.morphs,self.preset_source=preset_values(preset,preset_name,weight)
@@ -92,12 +93,12 @@ class Scanner:
                 archives.append(self.data/n)
         for plugin in self.plugins:
             for name in (Path(plugin).with_suffix('.bsa').name,Path(plugin).stem+' - Textures.bsa'):
-                if (self.data/name).is_file() and self.data/name not in archives:archives.append(self.data/name)
+                if readable_file(self.data/name) and self.data/name not in archives:archives.append(self.data/name)
         self.resources=Resources(self.data,archives)
         self.records,self.plugin_sources=load_records(self.data,self.plugins,progress)
         self.profile_sources=[{'kind':'profile','path':str(self.profile/n),'sha256':file_hash(self.profile/n)}
-                              for n in ('plugins.txt','loadorder.txt') if (self.profile/n).exists()]
-        if archive_list:self.profile_sources.append({'kind':'profile','path':str(archive_list.resolve()),'sha256':file_hash(archive_list)})
+                              for n in ('plugins.txt','loadorder.txt') if readable_file(self.profile/n)]
+        if archive_list:self.profile_sources.append({'kind':'profile','path':str(absolute_path(archive_list)),'sha256':file_hash(archive_list)})
         self.rows=[];self.private={};self.candidates=[]
         self.created=time.time();self.used_sources={}
 
@@ -332,7 +333,7 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
             token=(src['resource'],src['sha256'])
             if token in checked:continue
             _,now=resources.read(src['resource'])
-            if now['sha256']!=src['sha256'] or now['kind']!=src['kind'] or Path(now['path']).resolve()!=Path(src['path']).resolve():
+            if now['sha256']!=src['sha256'] or now['kind']!=src['kind'] or os.path.normcase(str(absolute_path(Path(now['path']))))!=os.path.normcase(str(absolute_path(Path(src['path'])))):
                 raise ValueError('resource/provider changed; rescan: '+src['resource'])
             checked.add(token)
         note=f"Reviewed offline baseline suggestion ({VERSION}), weight={report['context']['weight']:g}, residual={row['normalizedResidual']:.6f}. Revisit after mesh/body changes; not live OBody calibration."

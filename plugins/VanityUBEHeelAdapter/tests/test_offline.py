@@ -9,6 +9,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zlib
 sys.path.insert(0,str(Path(__file__).parents[1]/'tools'))
 from offline.formats import *
@@ -93,6 +94,81 @@ class OfflineTests(unittest.TestCase):
             b=nif([(p[0],p[1],z) for p in points],triangles,name,'!UBE/test/'+n+'.tri')
             self.write(f'meshes/!UBE/test/{n}_0.nif',b);self.write(f'meshes/!UBE/test/{n}_1.nif',b)
             self.write(f'meshes/!UBE/test/{n}.tri',tri(name,{'NoHeel':{i:(0,0,-1) for i in range(300)},'Heel':{i:(0,0,1) for i in range(300)}} if n=='sock' else {}))
+    def test_vfs_stat_false_negative_end_to_end(self):
+        self.fixture()
+        dest=self.data/'SKSE/Plugins'
+        # All path metadata falsely reports missing, but ordinary opens work.
+        with mock.patch.object(Path,'stat',side_effect=FileNotFoundError('synthetic VFS stat miss')):
+            s=Scanner(self.data,self.profile,dest/'VanityUBEHeelAdapter/offline')
+            s.scan();r=s.recommend('Flat.esp|00000801')
+            self.assertEqual(len(s.plugins),4)
+            self.assertEqual(len(r['entries']),2)
+            receipt=apply_report(s.output/'offline-candidates.json',dest,[0,1])
+            self.assertEqual(len(receipt['appliedIndexes']),2)
+            repeat=apply_report(s.output/'offline-candidates.json',dest,[0,1])
+            self.assertEqual(len(repeat['preservedExistingIndexes']),2)
+        self.assertTrue((dest/'VanityUBEHeelAdapter.user.json').exists())
+
+    def test_vfs_stat_miss_preserves_existing_user_pair(self):
+        self.fixture();dest=self.data/'SKSE/Plugins'
+        atomic_json(dest/'VanityUBEHeelAdapter.user.json',{'pairs':[{
+            'stocking':'Sock.esp|00000801','footwear':'High.esp|00000801',
+            'NoHeel':0,'Heel':1.1}]})
+        with mock.patch.object(Path,'stat',side_effect=FileNotFoundError('synthetic VFS stat miss')):
+            s=Scanner(self.data,self.profile,self.root/'out');s.scan();s.recommend('Flat.esp|00000801')
+            receipt=apply_report(s.output/'offline-candidates.json',dest,[0,1])
+            self.assertEqual(len(receipt['preservedExistingIndexes']),1)
+        user=json.loads((dest/'VanityUBEHeelAdapter.user.json').read_text())
+        self.assertEqual(next(x for x in user['pairs'] if x['footwear']=='High.esp|00000801')['Heel'],1.1)
+
+    def test_vfs_stat_miss_archives_and_loose_priority(self):
+        self.fixture()
+        p=self.data/'High.bsa'
+        bsa(p,'meshes\\!UBE\\test\\archive.nif',b'archive',compressed=True)
+        loose=self.write('meshes/!UBE/test/archive.nif',b'loose')
+        with mock.patch.object(Path,'stat',side_effect=FileNotFoundError('synthetic VFS stat miss')):
+            s=Scanner(self.data,self.profile,self.root/'out')
+            self.assertEqual(len(s.resources.archives),1)
+            self.assertEqual(s.resources.read('!UBE/test/archive.nif')[0],b'loose')
+            loose.unlink()
+            self.assertEqual(s.resources.read('!UBE/test/archive.nif')[0],b'archive')
+
+    def test_unreadable_loose_never_uses_archive(self):
+        p=self.data/'fixture.bsa';bsa(p,'meshes\\!UBE\\test.nif',b'archive')
+        r=Resources(self.data,[p])
+        real_open=Path.open
+        def denied(path,*a,**kw):
+            if path.suffix=='.nif':raise PermissionError('read denied')
+            return real_open(path,*a,**kw)
+        with mock.patch.object(Path,'open',denied),self.assertRaises(PermissionError):
+            r.read('!UBE/test.nif')
+
+    def test_really_missing_active_plugin_is_not_skipped(self):
+        self.fixture();(self.data/'High.esp').unlink()
+        with self.assertRaisesRegex(FileNotFoundError,'MO2'):
+            Scanner(self.data,self.profile,self.root/'out')
+        self.assertFalse((self.root/'out/offline-candidates.json').exists())
+
+    def test_archive_replacement_same_size_same_time_is_rejected(self):
+        p=self.data/'fixture.bsa';bsa(p,'meshes\\!UBE\\test.nif',b'archive')
+        archive=Archive(p);meta=p.stat();temp=self.data/'new.bsa'
+        temp.write_bytes(p.read_bytes());os.utime(temp,ns=(meta.st_atime_ns,meta.st_mtime_ns))
+        os.replace(temp,p)
+        with self.assertRaisesRegex(FormatError,'BSA-changed'):
+            archive.read('meshes\\!ube\\test.nif')
+
+    def test_mapped_plugin_digest_is_actual_parsed_bytes(self):
+        self.fixture();path=self.data/'High.esp'
+        masters,rows,source=read_plugin(path,{'high.esp':'High.esp','skyrim.esm':'Skyrim.esm'},with_source=True)
+        self.assertEqual(source['sha256'],hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(masters,['Skyrim.esm']);self.assertEqual(len(rows),2)
+
+    def test_output_directory_is_not_a_file(self):
+        from vha_fileio import ensure_directory
+        p=self.root/'not-a-directory';p.write_text('keep')
+        with self.assertRaises(OSError):ensure_directory(p)
+        self.assertEqual(p.read_text(),'keep')
+
     def test_full_scan_pair_and_apply(self):
         self.fixture();s=Scanner(self.data,self.profile,self.root/'out');catalog=s.scan()
         self.assertEqual(len(s.plugins),4);self.assertEqual(sum(r['status']=='measurable' for r in s.rows),3)

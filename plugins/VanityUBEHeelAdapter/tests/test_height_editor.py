@@ -3,8 +3,10 @@ import json
 import tempfile
 import unittest
 import time
+import sys
 from unittest import mock
 from pathlib import Path
+sys.path.insert(0,str(Path(__file__).parents[1]/'tools'))
 spec=importlib.util.spec_from_file_location('editor',Path(__file__).parents[1]/'tools/height_editor.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class Tests(unittest.TestCase):

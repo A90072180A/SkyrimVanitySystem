@@ -1,0 +1,26 @@
+name: Offline tools Python 3.12
+on:
+  push:
+    branches: [vanity-ube-heel-adapter-poc]
+    paths:
+      - 'plugins/VanityUBEHeelAdapter/tools/**'
+      - 'plugins/VanityUBEHeelAdapter/tests/test_*.py'
+      - '.github/workflows/test-offline-tools.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_offline.py
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
+      - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools
