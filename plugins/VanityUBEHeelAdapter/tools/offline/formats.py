@@ -117,31 +117,15 @@ def subrecords(data: bytes):
         yield sig.decode('ascii', 'strict'), r.take(size)
     if extra is not None: raise FormatError('dangling-XXXX')
 
-def active_plugins(data: Path, profile: Path) -> list[str]:
-    """MO2 SSE profile: starred plugins only, with official implicit masters."""
-    p = profile / 'plugins.txt'
-    lines = bounded_read(p, 1024 * 1024).decode('utf-8-sig').splitlines()
-    enabled = [line.strip()[1:] for line in lines if line.strip().startswith('*')]
-    if not enabled:
-        raise FormatError('plugins.txt has no * enabled entries; select the actual MO2 SSE profile')
-    implicit = ['Skyrim.esm', 'Update.esm', 'Dawnguard.esm', 'HearthFires.esm', 'Dragonborn.esm']
-    enabled = [n for n in implicit if readable_file(data/n)] + enabled
-    names = {}
-    for n in enabled:
-        if PureWindowsPath(n).name != n or '\\' in n or '/' in n or Path(n).suffix.lower() not in ('.esp', '.esm', '.esl'):
-            raise FormatError('unsafe-plugin-name')
-        names.setdefault(n.casefold(), n)
-    order_path = profile/'loadorder.txt'
-    ordered = []
-    if readable_file(order_path):
-        for line in bounded_read(order_path, 1024*1024).decode('utf-8-sig').splitlines():
-            n = line.strip().lstrip('*')
-            if n.casefold() in names and n.casefold() not in {x.casefold() for x in ordered}:
-                ordered.append(names[n.casefold()])
-    # Official masters may be omitted by profile exporters.
-    ordered = [n for n in implicit if n.casefold() in names and n not in ordered] + ordered
-    ordered += [n for n in names.values() if n.casefold() not in {x.casefold() for x in ordered}]
-    return ordered
+def active_plugins(data: Path, profile: Path, *, evidence=None) -> list[str]:
+    """Resolve the MO2 profile plus installed game-root Skyrim.ccc entries.
+
+    CCC plugins are early/implicitly active even if absent or unstarred in
+    plugins.txt. Only these declared primary plugins bypass the star requirement.
+    No profile, manifest, plugin or mod priority is modified.
+    """
+    from .loadorder import resolve_plugins
+    return resolve_plugins(data, profile, evidence=evidence)
 
 def read_plugin(path: Path, canonical: dict[str, str], *, with_source=False):
     """Yield winning-record candidates; traverse only top-level ARMO/ARMA groups."""
@@ -238,7 +222,17 @@ def load_records(data: Path, plugins: list[str], progress=lambda s:None):
             ) from exc
         for m in masters:
             if m.casefold() not in seen:
-                raise FormatError(f'{name}: missing/late active master {m}; check plugins/loadorder')
+                if m.casefold() in canonical:
+                    why = 'late-active-master'
+                    detail = '主文件已在扫描列表中，但排在依赖它的插件后面。'
+                elif readable_file(data/m):
+                    why = 'master-not-active'
+                    detail = '主文件可以打开，但未被当前 profile 或游戏根目录 Skyrim.ccc 纳入。'
+                else:
+                    why = 'master-not-visible'
+                    detail = '当前进程无法在所选虚拟 Data 中打开主文件。'
+                raise FormatError(f'{name}: {why}: {m}\n{detail} '
+                                  '扫描已停止；不会跳过依赖或自动启用普通模组。')
         sources.append(source)
         for row in rows:
             key=row['id'].casefold()

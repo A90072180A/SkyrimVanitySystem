@@ -13,9 +13,10 @@ import xml.etree.ElementTree as ET
 from .formats import (FormatError, Resources, active_plugins, load_records, bounded_read,
                       parse_nif, parse_tri, relative_model, file_hash, sha256)
 from . import geometry as geo
+from .loadorder import verify_sources
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline2'
+VERSION='0.17.0-offline3'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
@@ -82,7 +83,28 @@ class Scanner:
         if not math.isfinite(weight) or not 0<=weight<=100:raise ValueError('weight must be 0..100')
         self.weight=weight;self.progress=progress;self.race=race
         self.morphs,self.preset_source=preset_values(preset,preset_name,weight)
-        self.plugins=active_plugins(self.data,self.profile)
+        self.load_order={'schema':1,'generatorVersion':VERSION,
+                         'data':str(self.data),'profile':str(self.profile),
+                         'state':'reading-inputs'}
+        order_report=self.output/'offline-loadorder.json'
+        try:
+            self.plugins=active_plugins(self.data,self.profile,evidence=self.load_order)
+            atomic_json(order_report,self.load_order)
+            progress(f"加载顺序：{len(self.plugins)} 个插件，其中 "
+                     f"{len(self.load_order['includedCCC'])} 个来自 Skyrim.ccc")
+            self.records,self.plugin_sources=load_records(self.data,self.plugins,progress)
+            verify_sources(self.load_order['inputSources'])
+            self.load_order['state']='masters-validated'
+            atomic_json(order_report,self.load_order)
+        except Exception as exc:
+            self.load_order.update(state='failed',error=str(exc),errorType=type(exc).__name__)
+            try:
+                atomic_json(order_report,self.load_order)
+                progress(f'加载顺序诊断已保存：{order_report}')
+            except OSError:
+                pass  # Never hide the original read/validation error.
+            raise
+        self.profile_sources=self.load_order['inputSources']
         # Known plugin-associated archives, plus an explicit ordered list for INI archives.
         archives=[]
         if archive_list:
@@ -95,9 +117,6 @@ class Scanner:
             for name in (Path(plugin).with_suffix('.bsa').name,Path(plugin).stem+' - Textures.bsa'):
                 if readable_file(self.data/name) and self.data/name not in archives:archives.append(self.data/name)
         self.resources=Resources(self.data,archives)
-        self.records,self.plugin_sources=load_records(self.data,self.plugins,progress)
-        self.profile_sources=[{'kind':'profile','path':str(self.profile/n),'sha256':file_hash(self.profile/n)}
-                              for n in ('plugins.txt','loadorder.txt') if readable_file(self.profile/n)]
         if archive_list:self.profile_sources.append({'kind':'profile','path':str(absolute_path(archive_list)),'sha256':file_hash(archive_list)})
         self.rows=[];self.private={};self.candidates=[]
         self.created=time.time();self.used_sources={}
@@ -294,6 +313,7 @@ class Scanner:
                 'reference':anchor_row,'referenceAssumption':'Selected shoe is a user-confirmed flat reference; stocking NoHeel=1 is assumed flat. Neither is established by a filename alone.',
                 'applySemantics':'Selected values become deliberate fixed manual pairs, not live-body-validated automatic profiles. Existing manual/ignored pairs are preserved.',
                 'inputSources':self.plugin_sources+self.profile_sources+([self.preset_source] if self.preset_source else []),
+                'loadOrder':self.load_order,
                 'archivePaths':[str(a.path) for a in self.resources.archives], 'data':str(self.data),
                 'counts':dict(Counter(r['status'] for r in candidates)),'entries':candidates}
         atomic_json(self.output/'offline-candidates.json',report);self.candidates=candidates
@@ -313,8 +333,7 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
     editor=height_editor.Editor(plugins_dir,user_file)
     resources=Resources(Path(report['data']),[Path(x) for x in report.get('archivePaths',[])])
     # A different active load order can change every winning ARMA: check it first.
-    for src in report['inputSources']:
-        if file_hash(Path(src['path']))!=src['sha256']:raise ValueError('input changed; rescan: '+src['path'])
+    verify_sources(report['inputSources'])
     protected={(r['stocking'].casefold(),r['footwear'].casefold()) for r in editor.user.get('pairs',[])}
     ignored={r['armor'].casefold() for r in editor.user.get('items',[]) if r['kind']=='ignore'}
     protected.update((r['stocking'].casefold(),r['footwear'].casefold()) for r in editor.base.get('signedHeightOverrides',[]))
