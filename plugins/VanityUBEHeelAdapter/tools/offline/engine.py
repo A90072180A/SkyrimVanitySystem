@@ -16,22 +16,23 @@ from . import geometry as geo
 from .loadorder import verify_sources
 from .catalog_query import pair_plan
 from .provenance import annotate
+from .shoe_groups import response_info
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline5'
+VERSION='0.17.0-offline6'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
+from .candidate_store import stream_json, read_candidates, write_candidates
+
+class CandidateSaveError(OSError):
+    """The calculation is complete and retained in RAM, but not published."""
+    def __init__(self, report, cause):
+        self.report = report
+        super().__init__('计算已完成，但报告未保存；当前结果仍在内存中，可点击“重新保存结果”。\n'+str(cause))
+
 def atomic_json(path:Path,value,limit=64*1024*1024):
-    payload=(json.dumps(value,ensure_ascii=False,allow_nan=False,indent=2)+'\n').encode('utf-8')
-    if len(payload)>limit:raise ValueError('output exceeds size limit')
-    ensure_directory(path.parent)
-    tmp=path.with_name(path.name+f'.{os.getpid()}.tmp')
-    try:
-        with tmp.open('wb') as f:f.write(payload);f.flush();os.fsync(f.fileno())
-        os.replace(tmp,path)
-    finally:
-        unlink_missing_ok(tmp)
+    return stream_json(path,value,limit)
 
 def read_json(path):return json.loads(bounded_read(path).decode('utf-8-sig'),parse_constant=lambda x:(_ for _ in ()).throw(ValueError('nonfinite JSON')))
 
@@ -327,13 +328,15 @@ class Scanner:
             stock,stock_sources=self.get_shape(sock);n=len(stock['points'])
             noheel=dense(stock['morphs'].get('NoHeel',{}),n);heel=dense(stock['morphs'].get('Heel',{}),n)
             flat=[geo.add(p,d) for p,d in zip(stock['points'],noheel)]
+            response=response_info(stock,noheel,heel)
             map_cache={}
             for shoe in shoes:
                 number+=1;self.progress(f'高度配对 {number}/{len(socks)*len(shoes)}：{sock["name"]} + {shoe["name"]}')
                 row={'index':len(candidates),'stocking':sock['armor'],'stockingAddon':sock['addon'],'stockingModel':sock['model'],
                      'footwear':shoe['armor'],'footwearAddon':shoe['addon'],'footwearModel':shoe['model'],
                      'stockingName':sock['name'],'footwearName':shoe['name'],'NoHeel':None,'Heel':None,
-                     'status':'not-run','requiresVisualReview':True,'reference':anchor_row['key']}
+                     'status':'not-run','requiresVisualReview':True,'reference':anchor_row['key'],
+                     'stockingResponse':response}
                 try:
                     target,target_sources=self.get_shape(shoe)
                     if not transforms_equal(anchor,target) or not transforms_equal(stock,anchor):raise FormatError('local-or-skin-transform-mismatch')
@@ -360,19 +363,27 @@ class Scanner:
                 'loadOrder':self.load_order,'recordValidation':self.record_validation(),
                 'archivePaths':[str(a.path) for a in self.resources.archives], 'data':str(self.data),
                 'counts':dict(Counter(r['status'] for r in candidates)),'entries':candidates}
-        atomic_json(self.output/'offline-candidates.json',report);self.candidates=candidates
+        # Retain expensive completed calculations even if disk publication fails.
+        self.candidates=candidates
+        self.pending_report=report
+        self.progress('正在去重并保存高度配对报告…')
+        try: write_candidates(self.output/'offline-candidates.json',report)
+        except (OSError,ValueError,TypeError) as exc: raise CandidateSaveError(report,exc) from exc
         return report
 
 # struct.error is separate from ValueError on CPython.
 import struct
 struct_error=struct.error
 
-def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_review=False,user_file:Path|None=None):
+def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_review=False,user_file:Path|None=None,*,expected_sha256=None):
     """Explicit batch application; keep pre-existing instructions and all assets."""
     import height_editor
-    report=read_json(report_path)
+    report=read_candidates(report_path)
+    if expected_sha256 is not None and report["_storage"]["sha256"] != expected_sha256:
+        raise ValueError("候选报告已被其他窗口或程序修改；请重新计算/载入正确结果，不会按旧行号应用。")
     if report.get('schema')!=1 or report.get('generatorVersion')!=VERSION:raise ValueError('unsupported offline report')
     if not indexes:raise ValueError('no candidates selected')
+    if any(type(i) is not int or not 0<=i<len(report['entries']) for i in indexes):raise ValueError('invalid candidate index')
     if len(set(indexes))!=len(indexes):raise ValueError('duplicate selected indexes')
     editor=height_editor.Editor(plugins_dir,user_file)
     resources=Resources(Path(report['data']),[Path(x) for x in report.get('archivePaths',[])])
@@ -386,6 +397,14 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
     ignored={r['armor'].casefold() for r in editor.user.get('items',[]) if r['kind']=='ignore'}
     protected.update((r['stocking'].casefold(),r['footwear'].casefold()) for r in editor.base.get('signedHeightOverrides',[]))
     legacy_shoes={k.casefold() for k in editor.base.get('heels',{})}
+    potential=set()
+    for i in indexes:
+        r=report['entries'][i];key=r['stocking'].casefold(),r['footwear'].casefold()
+        if key not in protected and key[0] not in ignored and key[1] not in ignored and key[1] not in legacy_shoes:
+            potential.add(key)
+    if len(editor.user.get('pairs',[]))+len(potential)>2048:
+        raise ValueError(f'现有 {len(editor.user.get("pairs",[]))} 对 + 本次新增 {len(potential)} 对，超过当前 DLL 的 2048 对用户配置上限。'
+                         '没有写入部分配置。请缩小应用范围；计算报告容量与游戏配置容量不是同一个限制。')
     added=[];preserved=[];checked=set()
     for i in indexes:
         if not isinstance(i,int) or not 0<=i<len(report['entries']):raise ValueError('invalid candidate index')
@@ -412,7 +431,7 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
             editor.mark(row['stocking'],'stocking','Offline scan: real NoHeel capability verified',row['stockingAddon'])
         protected.add(key);added.append(i)
     if len(editor.user.get('pairs',[]))>2048 or len(editor.user.get('items',[]))>2048:raise ValueError('user configuration entry limit')
-    if len(json.dumps(editor.user,ensure_ascii=False).encode())>900000:raise ValueError('configuration too large; reduce selected batch')
+    if len((json.dumps(editor.user,ensure_ascii=False,allow_nan=False,indent=2)+'\n').encode('utf-8'))>900000:raise ValueError('configuration too large; reduce selected batch')
     # Validate the entire overlay before saving with the existing editor's
     # concurrent-write and live-path guards. No partial batch is written.
     validate_user(editor.user,editor.maximum)

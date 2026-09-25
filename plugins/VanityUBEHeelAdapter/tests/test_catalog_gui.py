@@ -35,6 +35,11 @@ class GuiTests(unittest.TestCase):
 
     def tearDown(self):
         self.app['close']()
+        # Tk variables must be finalized on the owning thread, not during a
+        # later test's geometry-worker allocation/garbage collection.
+        self.app.clear();self.app=None;self.window=None
+        import gc
+        gc.collect()
         for p in self.patches:p.stop()
         fixtures.OfflineTests.tearDown(self)
 
@@ -110,5 +115,53 @@ class GuiTests(unittest.TestCase):
         for panel in self.app['panels'][:2]:panel.select_filtered()
         self.window.update();self.assertEqual(str(self.app['compute_button']['state']),'disabled')
         self.assertIn('预览',self.app['message'].get())
+
+    def selected_compute(self):
+        self.scan();stock,shoe,_=self.app['panels']
+        stock.select_filtered();shoe.select_filtered();self.window.update()
+        self.app['recommend']();self.wait()
+
+    def test_saved_compact_report_group_preview_does_not_change_values(self):
+        self.selected_compute()
+        r=self.app['state']['report'];path=self.root/'out/offline-candidates.json'
+        before=path.read_bytes()
+        self.assertEqual(json.loads(before)['schema'],2)
+        group_window=self.app['group_preview']();self.window.update()
+        g=group_window.vha['state']['report']
+        self.assertFalse(g['runtimeReadable']);self.assertFalse(g['automaticApplicationAllowed'])
+        group_window.vha['tolerance'].set('0.02');group_window.vha['cross'].set(True)
+        group_window.vha['refresh']();self.window.update()
+        self.assertEqual(path.read_bytes(),before)
+        self.assertTrue((self.root/'out/offline-shoe-groups.json').is_file())
+        self.assertFalse((self.root/'dest/VanityUBEHeelAdapter.user.json').exists())
+        group_window.destroy()
+
+    def test_failed_publication_retains_results_and_retries_without_recompute(self):
+        self.scan();stock,shoe,_=self.app['panels']
+        stock.select_filtered();shoe.select_filtered();self.window.update()
+        with mock.patch('offline.engine.write_candidates',side_effect=PermissionError('synthetic locked file')):
+            self.app['recommend']()
+            deadline=time.monotonic()+10
+            while self.app['state']['busy'] and time.monotonic()<deadline:
+                self.window.update();time.sleep(.01)
+            self.window.update()
+        self.assertEqual(len(self.errors),1);self.errors.clear()
+        self.assertIsNotNone(self.app['state']['report']);self.assertFalse(self.app['state']['reportSaved'])
+        self.app['candidates'].selection_set(['0']);self.app['apply']();self.window.update()
+        self.assertFalse(self.app['state']['busy'])
+        self.assertFalse((self.root/'dest/VanityUBEHeelAdapter.user.json').exists())
+        with mock.patch('offline.engine.geo.fit',side_effect=AssertionError('must not recompute')):
+            self.app['retry_save']();self.wait()
+        self.assertTrue(self.app['state']['reportSaved'])
+        self.assertEqual(json.loads((self.root/'out/offline-candidates.json').read_bytes())['schema'],2)
+
+    def test_grouping_ignores_rejected_rows_and_selected_scope_is_explicit(self):
+        self.selected_compute()
+        self.app['candidates'].selection_set(['0'])
+        window=self.app['group_preview']();self.window.update()
+        report=window.vha['state']['report']
+        self.assertEqual([i for g in report['groups'] for i in g['memberIndexes']],[0])
+        self.assertFalse((self.root/'dest/VanityUBEHeelAdapter.user.json').exists())
+        window.destroy()
 
 if __name__=='__main__':unittest.main(verbosity=2)

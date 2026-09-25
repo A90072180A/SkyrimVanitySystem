@@ -15,8 +15,10 @@ import queue
 import sys
 import threading
 import traceback
-from offline.engine import Scanner, apply_report, atomic_json, read_json, validate_user, DEFAULT_ANCHOR, VERSION
+from offline.engine import Scanner, apply_report, atomic_json, read_json, validate_user, DEFAULT_ANCHOR, VERSION, CandidateSaveError
 from offline.catalog_query import pair_plan, select_rows
+from offline.candidate_store import write_candidates
+from offline.shoe_groups import propose
 from vha_fileio import absolute_path
 
 
@@ -59,7 +61,7 @@ def gui(args, *, run_loop=True):
     panels=(sock_panel,shoe_panel,catalog)
     candidates=table(candidate_frame,('丝袜','鞋子','NoHeel','Heel','原计算残差','状态'),(230,230,75,75,85,220))
     actions=ttk.Frame(root,padding=10);actions.pack(fill='x')
-    q=queue.Queue();cancel=threading.Event();state={'scanner':None,'report':None,'busy':False}
+    q=queue.Queue();cancel=threading.Event();state={'scanner':None,'report':None,'busy':False,'reportSaved':False}
     buttons=[];compute_button=None
     scope_text=tk.StringVar(value='本次计算：0 条丝袜 × 0 双鞋 = 0 对 / 上限 20,000。请分别选择；不会默认全选。')
     ttk.Label(root,textvariable=scope_text,padding=(10,3),wraplength=1300).pack(fill='x')
@@ -79,7 +81,7 @@ def gui(args, *, run_loop=True):
         anchorbox['values']=[r['key'] for r in rows if r['kind']=='footwear' and r['status']=='measurable']
         update_scope()
     def clear_candidates():
-        state['report']=None
+        state['report']=None;state['reportSaved']=False
         children=candidates.get_children()
         if children:candidates.delete(*children)
     def browse_catalog():
@@ -115,6 +117,7 @@ def gui(args, *, run_loop=True):
         for b in buttons:b.configure(state='disabled')
         def worker():
             try:q.put(('done',(done,fn())))
+            except CandidateSaveError as e:q.put(('unsaved',(e.report,str(e))))
             except Exception as e:q.put(('error',(str(e),traceback.format_exc())))
         threading.Thread(target=worker,daemon=True).start()
     def scan():
@@ -152,19 +155,86 @@ def gui(args, *, run_loop=True):
         if plan['count']>1000 and not messagebox.askyesno('较大的计算任务',f'本次 {plan["count"]:,} 对，可能耗时较长。继续？'):return
         selected_anchor=anchor.get()
         clear_candidates()
-        def done(r):
-            state['report']=r;candidates.delete(*candidates.get_children())
-            for row in r['entries']:
-                fmt=lambda v:'' if v is None else f'{v:.5f}'
-                candidates.insert('','end',iid=str(row['index']),values=(row['stockingName'],row['footwearName'],fmt(row['NoHeel']),fmt(row['Heel']),fmt(row.get('normalizedResidual')),row['status']))
-            notebook.select(candidate_frame);msg.set(f'计算完成：{len(r["entries"])} 对。数值是离线建议；勾选并应用后作为手工搭配指令保存。')
-        job(lambda:s.recommend(selected_anchor,keys,heel_max=args.heel_max,shoe_keys=shoe_keys),done)
+        job(lambda:s.recommend(selected_anchor,keys,heel_max=args.heel_max,shoe_keys=shoe_keys),show_report)
+    def show_report(r, *, saved=True):
+        state['report']=r;state['reportSaved']=saved
+        children=candidates.get_children()
+        if children:candidates.delete(*children)
+        for row in r['entries']:
+            fmt=lambda v:'' if v is None else f'{v:.5f}'
+            candidates.insert('','end',iid=str(row['index']),values=(row['stockingName'],row['footwearName'],fmt(row['NoHeel']),fmt(row['Heel']),fmt(row.get('normalizedResidual')),row['status']))
+        notebook.select(candidate_frame)
+        store=r.get('_storage',{})
+        size=f'已无损去重保存 {store.get("bytes",0)/1024/1024:.2f} MiB' if saved else '未保存；当前结果保留在内存，请重试保存，不可应用旧报告'
+        msg.set(f'计算完成：{len(r["entries"]):,} 对；{size}。数值未舍入；游戏用户配置仍限 2048 对。')
+    def retry_save():
+        r=state['report'];scanner=state['scanner']
+        if not r or not scanner:return
+        if state['reportSaved']:
+            messagebox.showinfo('已保存','当前结果已保存，无需重新保存。');return
+        def run():
+            write_candidates(scanner.output/'offline-candidates.json',r)
+            return r
+        job(run,show_report)
+    def group_preview():
+        r=state['report'];scanner=state['scanner']
+        if not r or not scanner or not state['reportSaved']:
+            messagebox.showinfo('先保存结果','先计算并成功保存本次配对报告。');return
+        selected=[int(x) for x in candidates.selection()] or None
+        window=tk.Toplevel(root);window.title('按鞋共享值分析（仅预览，不修改滑块）');window.geometry('1130x620')
+        window.transient(root)
+        opts=ttk.Frame(window,padding=8);opts.pack(fill='x')
+        tolerance=tk.StringVar(value='0');cross=tk.BooleanVar(value=False)
+        ttk.Label(opts,text='系数容差（0=仅完全相同，建议试 0.02）：').pack(side='left')
+        ttk.Entry(opts,textvariable=tolerance,width=8).pack(side='left')
+        ttk.Checkbutton(opts,text='跨不同丝袜响应分析（仅数值相近，需逐组复核）',variable=cross).pack(side='left',padx=8)
+        detail=tk.StringVar(value='有选择时分析所选配对，否则分析本次全部结果。初始只分组相同响应、完全相同值。')
+        ttk.Label(window,textvariable=detail,padding=8,wraplength=1100).pack(fill='x')
+        area=ttk.Frame(window);area.pack(fill='both',expand=True,padx=8)
+        tree=table(area,('鞋子','方向','拟用值','成员数','原值最小','原值最大','最大系数变化','响应种类','原状态'),(240,70,90,60,95,95,105,70,170))
+        group_state={'report':None}
+        def refresh():
+            try:
+                if state['report'] is not r or not state['reportSaved']:
+                    raise ValueError('主窗口结果已经改变；请重新打开分组分析。')
+                g=propose(r,float(tolerance.get()),cross_family=cross.get(),indexes=selected)
+                if not g.get('sourceCandidateFileSHA256'):raise ValueError('缺少已保存报告指纹')
+                path=scanner.output/'offline-shoe-groups.json'
+                atomic_json(path,g)
+                group_state['report']=g
+                children=tree.get_children()
+                if children:tree.delete(*children)
+                for group in g['groups']:
+                    value=group['Heel'] if group['direction']=='Heel' else group['NoHeel']
+                    tree.insert('','end',iid=str(group['groupIndex']),values=(group['footwearName'],group['direction'],f'{value:.6g}',group['memberCount'],f'{group["minOriginal"]:.6g}',f'{group["maxOriginal"]:.6g}',f'{group["maxCoefficientChange"]:.6g}',group['responseFamilyCount'],group['sourceStatus']))
+                detail.set(f'{sum(x["memberCount"] for x in g["groups"]):,} 对 → {len(g["groups"]):,} 个分析组；排除 {len(g["excludedIndexes"])} 对。'
+                    f'已保存 {path.name}。此文件不是游戏配置，原始滑块值和拒绝状态未改变。')
+            except (ValueError,OSError) as exc:messagebox.showerror('分组未生成',str(exc),parent=window)
+        def members():
+            g=group_state['report'];chosen=tree.selection()
+            if not g or len(chosen)!=1:return
+            group=g['groups'][int(chosen[0])]
+            view=tk.Toplevel(window);view.title('明确成员与原始结果');view.geometry('1000x580')
+            text=tk.Text(view,wrap='none');text.pack(fill='both',expand=True)
+            summary={**group,'members':[{'index':i,'stocking':r['entries'][i]['stocking'],'addon':r['entries'][i]['stockingAddon'],
+                'NoHeel':r['entries'][i]['NoHeel'],'Heel':r['entries'][i]['Heel'],'status':r['entries'][i]['status']} for i in group['memberIndexes']]}
+            text.insert('1.0',json.dumps(summary,ensure_ascii=False,indent=2));text.configure(state='disabled')
+        bottom=ttk.Frame(window,padding=8);bottom.pack(fill='x')
+        ttk.Button(bottom,text='重新分析并保存预览',command=refresh).pack(side='left')
+        ttk.Button(bottom,text='查看所选组成员／原值',command=members).pack(side='left',padx=8)
+        ttk.Label(bottom,text='不会把近似值自动写入 .user.json。单对手工值、裸脚规则不变。').pack(side='left')
+        tree.bind('<Double-1>',lambda e:members())
+        refresh()
+        window.vha={'refresh':refresh,'tolerance':tolerance,'cross':cross,'state':group_state,'tree':tree,'members':members}
+        return window
     def select_safe():
         if state['report']:
             candidates.selection_set([str(r['index']) for r in state['report']['entries'] if r['status']=='within-mathematical-limits'])
     def apply():
         s=state['scanner'];r=state['report']
         if not s or not r:return
+        if not state['reportSaved']:
+            messagebox.showinfo('结果尚未保存','请先点击“重新保存结果”；不会应用上一次残留的报告。');return
         indexes=[int(x) for x in candidates.selection()]
         if not indexes:messagebox.showinfo('尚未选择','请选择要应用的配对。');return
         if not messagebox.askyesno('写入手工配置',f'把选中的 {len(indexes)} 对建议写入用户配置？\n已有手工值、忽略项会保留。\n这些是源模型基准下的建议，不保证当前 OBody、动画和视觉效果。\n不会改写 NIF/TRI/ESP。'):return
@@ -172,7 +242,7 @@ def gui(args, *, run_loop=True):
         def done(result):
             msg.set(f'已写入 {len(result["appliedIndexes"])} 对；保留 {len(result["preservedExistingIndexes"])} 对已有设置。文件：{result["userFile"]}')
             messagebox.showinfo('已保存',msg.get()+'\n这是文件保存结果，不代表游戏已应用。')
-        job(lambda:apply_report(s.output/'offline-candidates.json',plugins,indexes,review,args.user_file),done)
+        job(lambda:apply_report(s.output/'offline-candidates.json',plugins,indexes,review,args.user_file,expected_sha256=r.get('_storage',{}).get('sha256')),done)
     def adjust():
         r=state['report'];selection=candidates.selection()
         if not r or len(selection)!=1:messagebox.showinfo('选择一对','先选择一条有数值的配对。');return
@@ -188,10 +258,14 @@ def gui(args, *, run_loop=True):
             try:
                 import height_editor
                 nn,hh=float(n.get()),float(h.get());height_editor.controls(nn,hh,args.heel_max)
-                row.setdefault('originalSuggestion',{'NoHeel':row['NoHeel'],'Heel':row['Heel'],'status':row['status']})
-                row.update(NoHeel=nn,Heel=hh,status='manual-adjusted',residualAtEditedValue=None)
-                atomic_json(state['scanner'].output/'offline-candidates.json',r)
-                candidates.item(selection[0],values=(row['stockingName'],row['footwearName'],f'{nn:.5f}',f'{hh:.5f}',f'{row.get("normalizedResidual",0):.5f}','manual-adjusted'))
+                if state['report'] is not r:raise ValueError('报告已变，请重新选择。')
+                import copy
+                edited=copy.deepcopy(row)
+                edited.setdefault('originalSuggestion',{'NoHeel':row['NoHeel'],'Heel':row['Heel'],'status':row['status']})
+                edited.update(NoHeel=nn,Heel=hh,status='manual-adjusted',residualAtEditedValue=None)
+                next_report={**r,'entries':list(r['entries'])};next_report['entries'][edited['index']]=edited
+                write_candidates(state['scanner'].output/'offline-candidates.json',next_report)
+                show_report(next_report);candidates.selection_set([selection[0]])
                 window.destroy()
             except Exception as ex:messagebox.showerror('未保存',str(ex),parent=window)
         ttk.Button(window,text='保存手工建议',command=save_adjustment).pack(pady=8)
@@ -216,7 +290,7 @@ def gui(args, *, run_loop=True):
             except Exception as ex:messagebox.showerror('未保存',str(ex),parent=window)
         ttk.Button(window,text='保存分类',command=save_mark).pack()
     edit_actions=ttk.Frame(root,padding=(10,0));edit_actions.pack(fill='x')
-    for label,fn in (('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters)):
+    for label,fn in (('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters)):
         b=ttk.Button(edit_actions,text=label,command=fn);b.pack(side='left',padx=3);buttons.append(b)
     for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择误差门槛内建议',select_safe),('3. 一键应用所选',apply)):
         b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);buttons.append(b)
@@ -230,7 +304,7 @@ def gui(args, *, run_loop=True):
             for _ in range(100):
                 kind,value=q.get_nowait()
                 if kind=='progress':msg.set(value)
-                elif kind in ('done','error'):
+                elif kind in ('done','error','unsaved'):
                     state['busy']=False
                     for b in buttons:b.configure(state='normal')
                     if kind=='done':
@@ -238,6 +312,8 @@ def gui(args, *, run_loop=True):
                         except Exception as exc:
                             msg.set(str(exc));messagebox.showerror('界面更新未完成',str(exc))
                             traceback.print_exc()
+                    elif kind=='unsaved':
+                        show_report(value[0],saved=False);messagebox.showerror('结果仍在内存',value[1])
                     else:
                         msg.set(value[0]);messagebox.showerror('操作未完成',value[0]);print(value[1],file=sys.stderr)
                     update_scope()
@@ -253,7 +329,7 @@ def gui(args, *, run_loop=True):
     # Test seam uses the same widgets/actions as the shipped entry point.
     root.vha={'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
               'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
-              'state':state,'candidates':candidates,'scope':scope_text,'message':msg,
+              'state':state,'retry_save':retry_save,'group_preview':group_preview,'candidates':candidates,'scope':scope_text,'message':msg,
               'compute_button':compute_button,'populate':populate,'close':close}
     if run_loop:root.mainloop()
     return root

@@ -26,6 +26,7 @@ jobs:
       - run: python plugins/VanityUBEHeelAdapter/tests/test_plugin_records.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_catalog_query.py
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_candidate_store.py
       - if: runner.os == 'Windows'
         run: python plugins/VanityUBEHeelAdapter/tests/test_catalog_gui.py
         env:
