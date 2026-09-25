@@ -38,7 +38,7 @@ class LoadOrderTests(unittest.TestCase):
         self.assertEqual(s.plugins[:6],['Skyrim.esm',*names])
         self.assertEqual(s.plugins.count('USSEP.esp'),1)
         self.assertNotIn('Inactive.esp',s.plugins)
-        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text())
+        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text(encoding='utf-8'))
         self.assertEqual(receipt['includedCCC'],names)
         self.assertEqual(receipt['state'],'masters-validated')
         self.assertEqual(receipt['effectiveOrder'],s.plugins)
@@ -66,7 +66,7 @@ class LoadOrderTests(unittest.TestCase):
         names=self.official_fixture();(self.data/names[0]).unlink()
         with self.assertRaisesRegex(FormatError,'master-not-visible'):
             Scanner(self.data,self.profile,self.root/'out')
-        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text())
+        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text(encoding='utf-8'))
         self.assertEqual(receipt['state'],'failed')
         self.assertIn(names[0],[r['name'] for r in receipt['absentImplicit']])
         self.assertFalse((self.root/'out/offline-candidates.json').exists())
@@ -75,7 +75,7 @@ class LoadOrderTests(unittest.TestCase):
         self.official_fixture();(self.data.parent/'Skyrim.ccc').unlink()
         with self.assertRaisesRegex(FormatError,'master-not-active'):
             Scanner(self.data,self.profile,self.root/'out')
-        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text())
+        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text(encoding='utf-8'))
         self.assertEqual(receipt['cccState'],'absent')
         self.assertEqual(receipt['includedCCC'],[])
 
@@ -83,7 +83,7 @@ class LoadOrderTests(unittest.TestCase):
         self.official_fixture();(self.data.parent/'Skyrim.ccc').write_text('')
         with self.assertRaisesRegex(FormatError,'master-not-active'):
             Scanner(self.data,self.profile,self.root/'out')
-        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text())
+        receipt=json.loads((self.root/'out/offline-loadorder.json').read_text(encoding='utf-8'))
         self.assertEqual(receipt['cccState'],'present')
         self.assertEqual(receipt['cccEntries'],[])
 
