@@ -14,9 +14,11 @@ from .formats import (FormatError, Resources, active_plugins, load_records, boun
                       parse_nif, parse_tri, relative_model, file_hash, sha256)
 from . import geometry as geo
 from .loadorder import verify_sources
+from .catalog_query import pair_plan
+from .provenance import annotate
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline4'
+VERSION='0.17.0-offline5'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
@@ -78,10 +80,13 @@ def preset_values(path:Path|None,name:str|None,weight:float):
 
 class Scanner:
     def __init__(self,data:Path,profile:Path,output:Path,weight=0.,preset:Path|None=None,
-                 preset_name=None,archive_list:Path|None=None,race:str|None=None,progress=lambda s:None):
+                 preset_name=None,archive_list:Path|None=None,race:str|None=None,progress=lambda s:None,*,mods_root:Path|None=None):
         self.data,self.profile,self.output=absolute_path(data),absolute_path(profile),absolute_path(output)
         if not math.isfinite(weight) or not 0<=weight<=100:raise ValueError('weight must be 0..100')
         self.weight=weight;self.progress=progress;self.race=race
+        instance = self.profile.parent.parent if self.profile.parent.name.casefold() == "profiles" else None
+        self.mods_root = absolute_path(mods_root) if mods_root else (instance/"mods" if instance else None)
+        self.overwrite_root = instance/"overwrite" if instance else None
         self.morphs,self.preset_source=preset_values(preset,preset_name,weight)
         self.load_order={'schema':1,'generatorVersion':VERSION,
                          'data':str(self.data),'profile':str(self.profile),
@@ -215,6 +220,8 @@ class Scanner:
                 # Include unsupported alternatives in inventory instead of silently equating them with UBE.
                 key=armor['id']+'::'+addonid
                 row={'key':key,'armor':armor['id'],'addon':addonid,'name':armor['name'],'editorID':armor['editorID'],
+                     'armorWinnerPlugin':armor.get('sourcePlugin',armor.get('owner','')),
+                     'addonWinnerPlugin':addon.get('sourcePlugin',addon.get('owner','')),
                      'model':model,'kind':'footwear' if addon['slots']&(1<<7) else 'stocking-candidate',
                      'slots':addon['slots'],'UBE':is_ube,'weightSlider':addon['femaleWeightSlider'],
                      'race':addon['race'],'additionalRaces':addon['races'],'status':status,'shapes':[]}
@@ -239,8 +246,12 @@ class Scanner:
                     if row['kind']!='footwear':row['kind']='stocking'
                     self.private[key]=(model,addon['femaleWeightSlider'],shape['name'])
                 except (OSError,ValueError,struct_error) as e:row['status']='source-error: '+str(e)
+        for item in self.rows:
+            annotate(item, self.mods_root, self.overwrite_root)
         self.classify_foot_poses()
         report={'schema':1,'generatorVersion':VERSION,'createdUnix':self.created,'data':str(self.data),'profile':str(self.profile),
+                'provenance':{'modsRoot':str(self.mods_root) if self.mods_root else None,
+                    'semantics':'Model provider is derived only from the opened NIF/BSA handle path. Unknown stays unknown; plugin ownership is separate.'},
                 'plugins':self.plugins,'archives':[str(a.path) for a in self.resources.archives],
                 'context':self.context(),'coverage':'Active ARMO/ARMA inventory; UBE female SSE skinned single-partition geometry only. Missing/ambiguous assets explicitly skipped. INI-loaded archives require --archive-list.',
                 'counts':dict(Counter(r['status'] for r in self.rows)),'entries':self.rows,
@@ -301,14 +312,15 @@ class Scanner:
         if len(selected)!=1:raise FormatError('source-shape-no-longer-unique')
         return selected[0],sources
 
-    def recommend(self,anchor_id=DEFAULT_ANCHOR,stocking_keys=None,heel_max=2.,max_residual=.15,max_pairs=20000):
+    def recommend(self,anchor_id=DEFAULT_ANCHOR,stocking_keys=None,heel_max=2.,max_residual=.15,max_pairs=20000,*,shoe_keys=None):
         if not 1<=heel_max<=10 or not 0<=max_residual<=1:raise ValueError('invalid limits')
-        shoes=[r for r in self.rows if r['kind']=='footwear' and r['status']=='measurable']
-        socks=[r for r in self.rows if r['kind']=='stocking' and r['status']=='measurable' and (not stocking_keys or r['key'] in stocking_keys)]
-        anchors=[r for r in shoes if r['armor'].casefold()==anchor_id.casefold() or r['key'].casefold()==anchor_id.casefold()]
+        plan=pair_plan(self.rows,stocking_keys,shoe_keys,max_pairs)
+        if not plan['allowed']:raise FormatError(plan['reason'])
+        socks,shoes=plan['stockings'],plan['shoes']
+        # Reference comes from the full valid catalog, not the filtered target list.
+        anchors=[r for r in self.rows if r['kind']=='footwear' and r['status']=='measurable'
+                 and (r['armor'].casefold()==anchor_id.casefold() or r['key'].casefold()==anchor_id.casefold())]
         if len(anchors)!=1:raise FormatError('flat reference shoe not uniquely found; select its exact armor::addon key')
-        if len(shoes)*len(socks)>max_pairs:raise FormatError(f'{len(socks)} × {len(shoes)} exceeds {max_pairs} pair budget; select fewer stockings')
-        if not shoes or not socks:raise FormatError('no measurable stockings/shoes')
         anchor_row=anchors[0];anchor,anchor_sources=self.get_shape(anchor_row)
         candidates=[];number=0
         for sock in socks:
@@ -340,6 +352,8 @@ class Scanner:
                 candidates.append(row)
         report={'schema':1,'generatorVersion':VERSION,'createdUnix':time.time(),'context':self.context(),
                 'heelMax':heel_max,'NoHeelMaximum':1.,'maxResidual':max_residual,
+                'selection':{'stockingKeys':[r['key'] for r in socks],'shoeKeys':[r['key'] for r in shoes],
+                             'pairCount':plan['count'],'pairBudget':max_pairs,'semantics':'Only these exact keys; empty selection never expands to all.'},
                 'reference':anchor_row,'referenceAssumption':'Selected shoe is a user-confirmed flat reference; stocking NoHeel=1 is assumed flat. Neither is established by a filename alone.',
                 'applySemantics':'Selected values become deliberate fixed manual pairs, not live-body-validated automatic profiles. Existing manual/ignored pairs are preserved.',
                 'inputSources':self.plugin_sources+self.profile_sources+([self.preset_source] if self.preset_source else []),

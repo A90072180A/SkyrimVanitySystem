@@ -9,6 +9,7 @@ import hashlib
 import math
 import mmap
 from vha_fileio import handle_stamp, file_stamp, readable_file
+from .provenance import opened_path
 from pathlib import Path, PureWindowsPath
 import struct
 import zlib
@@ -28,15 +29,16 @@ def file_hash(path: Path) -> str:
             h.update(block)
     return h.hexdigest()
 
-def bounded_read(path: Path, limit: int = MAX_RESOURCE) -> bytes:
+def bounded_read(path: Path, limit: int = MAX_RESOURCE, *, with_path=False):
     with path.open('rb') as f:
         before = handle_stamp(f)
         data = f.read(limit + 1)
+        physical = opened_path(f) if with_path else None
         if before != handle_stamp(f):
             raise FormatError('resource-changed-during-read')
     if len(data) > limit:
         raise FormatError('resource-size-limit')
-    return data
+    return (data, physical) if with_path else data
 
 def text(data: bytes) -> str:
     data = data.rstrip(b'\0')
@@ -344,12 +346,13 @@ class Archive:
                 if key in self.entries:raise FormatError('duplicate-BSA-resource')
                 self.entries[key]=(size,pos)
             if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
-    def read(self,key):
+    def read(self,key, *, with_path=False):
         size,pos=self.entries[key];length=size&0x3fffffff
         if length>MAX_RESOURCE:raise FormatError('BSA-resource-size-limit')
         with self.path.open('rb') as f:
             if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
             f.seek(pos);raw=f.read(length)
+            physical = opened_path(f) if with_path else None
             if self.stamp!=handle_stamp(f):raise FormatError('BSA-changed-during-scan')
         if len(raw)!=length:raise FormatError('truncated-BSA-resource')
         r=Reader(raw)
@@ -360,7 +363,7 @@ class Archive:
             if len(payload)<4:raise FormatError('truncated-BSA-compressed-header')
             expected=struct.unpack_from('<I',payload)[0]
             payload=lz4_block(payload[4:],expected) if self.version==105 else decompress_zlib(payload[4:],expected)
-        return payload
+        return (payload, physical) if with_path else payload
 
 class Resources:
     def __init__(self,data:Path,archives:list[Path]=()):
@@ -369,13 +372,13 @@ class Resources:
         key='meshes\\'+relative_model(model)
         loose=self.data.joinpath(*key.split('\\'))
         try:
-            payload=bounded_read(loose)
+            payload,physical=bounded_read(loose,with_path=True)
         except (FileNotFoundError, NotADirectoryError):
             pass
         else:
-            return payload,{'kind':'loose','resource':key,'path':str(loose),'sha256':sha256(payload)}
+            return payload,{'kind':'loose','resource':key,'path':str(loose),'sha256':sha256(payload),'physicalPath':physical}
         for archive in reversed(self.archives):
             if key.casefold() in archive.entries:
-                payload=archive.read(key.casefold())
-                return payload,{'kind':'bsa','resource':key,'path':str(archive.path),'sha256':sha256(payload)}
+                payload,physical=archive.read(key.casefold(),with_path=True)
+                return payload,{'kind':'bsa','resource':key,'path':str(archive.path),'sha256':sha256(payload),'physicalPath':physical}
         raise FileNotFoundError('resource not found in loose Data or selected archives: '+key)
