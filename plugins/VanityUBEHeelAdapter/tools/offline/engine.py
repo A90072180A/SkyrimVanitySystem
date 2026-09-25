@@ -16,7 +16,7 @@ from . import geometry as geo
 from .loadorder import verify_sources
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline3'
+VERSION='0.17.0-offline4'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
@@ -87,21 +87,35 @@ class Scanner:
                          'data':str(self.data),'profile':str(self.profile),
                          'state':'reading-inputs'}
         order_report=self.output/'offline-loadorder.json'
+        self.record_diagnostics={'schema':1,'generatorVersion':VERSION,
+            'state':'not-started','issues':[],
+            'semantics':'Unresolved field references are quarantined, never remapped. '
+                        'Bad winning records and their dependents cannot generate height pairs.'}
+        record_report=self.output/'offline-records.json'
         try:
             self.plugins=active_plugins(self.data,self.profile,evidence=self.load_order)
             atomic_json(order_report,self.load_order)
             progress(f"加载顺序：{len(self.plugins)} 个插件，其中 "
                      f"{len(self.load_order['includedCCC'])} 个来自 Skyrim.ccc")
-            self.records,self.plugin_sources=load_records(self.data,self.plugins,progress)
+            self.records,self.plugin_sources=load_records(self.data,self.plugins,progress,
+                quarantine_references=True,diagnostics=self.record_diagnostics)
+            atomic_json(record_report,self.record_diagnostics)
             verify_sources(self.load_order['inputSources'])
             self.load_order['state']='masters-validated'
+            self.load_order['recordReport']=str(record_report)
+            self.load_order['recordIssueCount']=self.record_diagnostics.get('issueCount',0)
             atomic_json(order_report,self.load_order)
         except Exception as exc:
-            self.load_order.update(state='failed',error=str(exc),errorType=type(exc).__name__)
+            details=getattr(exc,'details',None)
+            self.record_diagnostics.update(state='failed',error=str(exc),errorType=type(exc).__name__)
+            if details:self.record_diagnostics['fatalError']=details
+            self.load_order.update(state='failed',error=str(exc),errorType=type(exc).__name__,
+                currentPlugin=self.record_diagnostics.get('currentPlugin'),recordReport=str(record_report))
             try:
+                atomic_json(record_report,self.record_diagnostics)
                 atomic_json(order_report,self.load_order)
                 progress(f'加载顺序诊断已保存：{order_report}')
-            except OSError:
+            except (OSError, ValueError):
                 pass  # Never hide the original read/validation error.
             raise
         self.profile_sources=self.load_order['inputSources']
@@ -162,6 +176,7 @@ class Scanner:
     def scan(self):
         armors=[r for r in self.records.values() if r['type']=='ARMO' and not r['deleted']]
         def relevant_armor(r):
+            if r.get('blockedBy'):return True
             if r['slots']&((1<<7)|(1<<8)|(1<<18)|(1<<23)) or any(s in (r['name']+' '+r['editorID']).casefold() for s in STOCK_WORDS):
                 return True
             # Localized names and full-body stockings are not reliably labelled.
@@ -170,7 +185,7 @@ class Scanner:
             # still required; an unknown mesh is never manufactured as a sock.
             for key in r['addons']:
                 a=self.records.get(key.casefold())
-                if not a or a['type']!='ARMA' or a['deleted']:continue
+                if not a or a['type']!='ARMA' or a['deleted'] or a.get('quarantined'):continue
                 if a['slots']&(1<<7):return True
                 try:
                     if a['femaleModel'] and relative_model(a['femaleModel']).casefold().startswith('!ube\\'):return True
@@ -179,6 +194,12 @@ class Scanner:
         relevant=[r for r in armors if relevant_armor(r)]
         for number,armor in enumerate(relevant):
             self.progress(f'模型 {number+1}/{len(relevant)}：{armor["name"]}')
+            if armor.get('blockedBy'):
+                self.rows.append({'key':armor['id'],'armor':armor['id'],'name':armor['name'],
+                    'kind':'unknown','status':'quarantined-winning-record' if armor.get('quarantined') else 'depends-on-quarantined-record',
+                    'blockedBy':armor['blockedBy'],'sourcePlugin':armor['sourcePlugin'],
+                    'parseIssue':armor.get('parseIssue'),'eligibleForHeight':False})
+                continue
             if not armor['addons']:
                 self.rows.append({'key':armor['id'],'armor':armor['id'],'name':armor['name'],'kind':'unknown','status':'missing-armature-or-template'});continue
             for addonid in dict.fromkeys(armor['addons']):
@@ -222,7 +243,10 @@ class Scanner:
         report={'schema':1,'generatorVersion':VERSION,'createdUnix':self.created,'data':str(self.data),'profile':str(self.profile),
                 'plugins':self.plugins,'archives':[str(a.path) for a in self.resources.archives],
                 'context':self.context(),'coverage':'Active ARMO/ARMA inventory; UBE female SSE skinned single-partition geometry only. Missing/ambiguous assets explicitly skipped. INI-loaded archives require --archive-list.',
-                'counts':dict(Counter(r['status'] for r in self.rows)),'entries':self.rows}
+                'counts':dict(Counter(r['status'] for r in self.rows)),'entries':self.rows,
+                'recordValidation':self.record_validation()}
+        self.record_diagnostics['catalogBlockedArmorCount']=sum(bool(r.get('blockedBy')) for r in self.rows)
+        atomic_json(self.output/'offline-records.json',self.record_diagnostics)
         atomic_json(self.output/'offline-catalog.json',report)
         return report
 
@@ -259,6 +283,12 @@ class Scanner:
             # Classification is optional; paired height mapping can still use
             # the explicitly chosen flat reference shoe without this foot asset.
             return
+
+    def record_validation(self):
+        return {'state':self.record_diagnostics['state'],
+            'issueCount':self.record_diagnostics.get('issueCount',0),
+            'blockedRecordIDs':self.record_diagnostics.get('blockedRecordIDs',[]),
+            'report':str(self.output/'offline-records.json')}
 
     def context(self):
         return {'weight':self.weight,'bodyMorphs':self.morphs,'preset':self.preset_source,'raceFilter':self.race,
@@ -313,7 +343,7 @@ class Scanner:
                 'reference':anchor_row,'referenceAssumption':'Selected shoe is a user-confirmed flat reference; stocking NoHeel=1 is assumed flat. Neither is established by a filename alone.',
                 'applySemantics':'Selected values become deliberate fixed manual pairs, not live-body-validated automatic profiles. Existing manual/ignored pairs are preserved.',
                 'inputSources':self.plugin_sources+self.profile_sources+([self.preset_source] if self.preset_source else []),
-                'loadOrder':self.load_order,
+                'loadOrder':self.load_order,'recordValidation':self.record_validation(),
                 'archivePaths':[str(a.path) for a in self.resources.archives], 'data':str(self.data),
                 'counts':dict(Counter(r['status'] for r in candidates)),'entries':candidates}
         atomic_json(self.output/'offline-candidates.json',report);self.candidates=candidates
@@ -334,6 +364,10 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
     resources=Resources(Path(report['data']),[Path(x) for x in report.get('archivePaths',[])])
     # A different active load order can change every winning ARMA: check it first.
     verify_sources(report['inputSources'])
+    blocked={x.casefold() for x in report.get('recordValidation',{}).get('blockedRecordIDs',[])}
+    reference=report.get('reference',{})
+    if any(reference.get(k,'').casefold() in blocked for k in ('armor','addon')):
+        raise ValueError('quarantined reference cannot be applied; rescan after correction')
     protected={(r['stocking'].casefold(),r['footwear'].casefold()) for r in editor.user.get('pairs',[])}
     ignored={r['armor'].casefold() for r in editor.user.get('items',[]) if r['kind']=='ignore'}
     protected.update((r['stocking'].casefold(),r['footwear'].casefold()) for r in editor.base.get('signedHeightOverrides',[]))
@@ -344,6 +378,8 @@ def apply_report(report_path:Path,plugins_dir:Path,indexes:list[int],allow_revie
         row=report['entries'][i]
         if row['status'] not in (('within-mathematical-limits','manual-adjusted','review-residual') if allow_review else ('within-mathematical-limits','manual-adjusted')):
             raise ValueError(f'candidate {i} is not applicable: {row["status"]}')
+        if any(row.get(k,'').casefold() in blocked for k in ('stocking','stockingAddon','footwear','footwearAddon')):
+            raise ValueError('quarantined pair cannot be applied; marking/manual-adjusting is not a bypass')
         key=(row['stocking'].casefold(),row['footwear'].casefold())
         if key in protected or key[0] in ignored or key[1] in ignored or key[1] in legacy_shoes:
             preserved.append(i);continue

@@ -23,5 +23,6 @@ jobs:
           python-version: '3.12'
       - run: python plugins/VanityUBEHeelAdapter/tests/test_offline.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_loadorder.py
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_plugin_records.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_height_editor.py
       - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools

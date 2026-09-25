@@ -69,6 +69,8 @@ def gui(args):
             d,p,w=Path(data.get()),Path(profile.get()),float(weight.get())
             output=args.output or d/'SKSE/Plugins/VanityUBEHeelAdapter/offline'
         except ValueError as e:messagebox.showerror('设置错误',str(e));return
+        state['scanner']=None;state['report']=None
+        catalog.delete(*catalog.get_children());candidates.delete(*candidates.get_children())
         def run():
             s=Scanner(d,p,output,w,args.preset,args.preset_name,args.archive_list,args.race,progress)
             report=s.scan();return s,report
@@ -80,7 +82,12 @@ def gui(args):
                 kind={'flat-like-foot-pose':'平脚姿鞋','raised-foot-pose':'高跟姿鞋'}.get(item.get('footPose',{}).get('kind'),kind)
                 catalog.insert('', 'end',iid=str(i),values=(item['name'],kind,item['status'],item.get('addon','')+' / '+item.get('model','')))
             anchorbox['values']=[r['key'] for r in s.rows if r['kind']=='footwear' and r['status']=='measurable']
-            msg.set(f'扫描完成：{len(s.plugins)} 个启用插件，{len(s.rows)} 个候选部件。按 Ctrl 选择要计算的丝袜；不选择则计算所有可测丝袜。')
+            blocked=s.record_diagnostics.get('quarantinedWinnerCount',0)
+            issues=s.record_diagnostics.get('issueCount',0)
+            prefix='扫描完成（存在隔离记录）' if blocked else '扫描完成'
+            msg.set(f'{prefix}：{len(s.plugins)} 个插件，{len(s.rows)} 个候选部件；'
+                    f'{issues} 条引用诊断，{blocked} 条异常最终记录已隔离。详情：offline-records.json。'
+                    '隔离项不会产生配对；按 Ctrl 选择可测丝袜。')
         job(run,done)
     def recommend():
         s=state['scanner']

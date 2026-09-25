@@ -127,119 +127,15 @@ def active_plugins(data: Path, profile: Path, *, evidence=None) -> list[str]:
     from .loadorder import resolve_plugins
     return resolve_plugins(data, profile, evidence=evidence)
 
-def read_plugin(path: Path, canonical: dict[str, str], *, with_source=False):
-    """Yield winning-record candidates; traverse only top-level ARMO/ARMA groups."""
-    with path.open('rb') as stream:
-        before = handle_stamp(stream)
-        if not 24 <= before[0] <= 2 * 1024**3:
-            raise FormatError('plugin-size-limit')
-        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            if data[:4] != b'TES4': raise FormatError('missing-TES4')
-            head_size, head_flags = struct.unpack_from('<II', data, 4)
-            if head_size > MAX_RESOURCE or head_size+24 > len(data): raise FormatError('bad-TES4-size')
-            masters = [text(v) for k,v in subrecords(bytes(data[24:24+head_size])) if k=='MAST']
-            if len(masters)>254 or len(set(x.casefold() for x in masters)) != len(masters):
-                raise FormatError('invalid-master-list')
-            origin = [canonical.get(x.casefold(), x) for x in masters] + [canonical.get(path.name.casefold(), path.name)]
-            def form(raw):
-                if raw == 0: return ''
-                idx, local = raw >> 24, raw & 0xffffff
-                if idx >= len(origin): raise FormatError('form-master-index-out-of-range')
-                return f'{origin[idx]}|{local:08X}'
-            result = []
-            def walk(start, end, depth=0):
-                if depth>32: raise FormatError('plugin-group-depth')
-                while start<end:
-                    if end-start<24: raise FormatError('truncated-plugin-header')
-                    sig = bytes(data[start:start+4]); size, flags = struct.unpack_from('<II',data,start+4)
-                    if sig==b'GRUP':
-                        if size<24 or start+size>end: raise FormatError('invalid-GRUP-size')
-                        group_type=struct.unpack_from('<i',data,start+12)[0]
-                        if group_type != 0 or bytes(data[start+8:start+12]) in (b'ARMO',b'ARMA'):
-                            walk(start+24,start+size,depth+1)
-                        start += size; continue
-                    if size>MAX_RESOURCE or start+24+size>end: raise FormatError('invalid-record-size')
-                    if sig in (b'ARMO',b'ARMA'):
-                        raw=struct.unpack_from('<I',data,start+12)[0]
-                        payload=bytes(data[start+24:start+24+size])
-                        if flags & 0x40000:
-                            if len(payload)<4: raise FormatError('truncated-compressed-record')
-                            payload=decompress_zlib(payload[4:],struct.unpack_from('<I',payload)[0])
-                        fields={}
-                        for k,v in subrecords(payload): fields.setdefault(k,[]).append(v)
-                        def first(k,default=b''): return fields.get(k,[default])[0]
-                        def ref(k):
-                            v=first(k)
-                            if not v:return ''
-                            if len(v)!=4:raise FormatError('invalid-form-reference')
-                            return form(struct.unpack('<I',v)[0])
-                        def refs(k):
-                            values=[]
-                            for v in fields.get(k,[]):
-                                if len(v)!=4:raise FormatError('invalid-form-reference')
-                                x=form(struct.unpack('<I',v)[0])
-                                if x:values.append(x)
-                            return values
-                        slots=first('BOD2',first('BODT'))
-                        if slots and len(slots)<4:raise FormatError('truncated-slot-mask')
-                        name=text(first('EDID'))
-                        full=first('FULL')
-                        if not head_flags&0x80 and full: name=text(full) or name
-                        row={'id':form(raw),'type':sig.decode(),'deleted':bool(flags&0x20),'name':name,
-                             'editorID':text(first('EDID')),'owner':path.name,'slots':struct.unpack_from('<I',slots)[0] if slots else 0,
-                             'race':ref('RNAM'),'sourcePlugin':path.name}
-                        if sig==b'ARMO':row.update(addons=refs('MODL'),template=ref('TNAM'))
-                        else:
-                            d=first('DNAM')
-                            row.update(femaleModel=text(first('MOD3')),maleModel=text(first('MOD2')),
-                                       femaleWeightSlider=bool(len(d)>3 and d[3]&2),races=refs('MODL'))
-                        result.append(row)
-                    start+=24+size
-            walk(24+head_size,len(data))
-            # Hash exactly the mapped file that was parsed, not a second open.
-            digest = sha256(data)
-            if before != handle_stamp(stream):
-                raise FormatError('plugin-changed-during-scan')
-    if before != file_stamp(path):
-        raise FormatError('plugin-replaced-during-scan')
-    if with_source:
-        return masters,result,{'kind':'plugin','path':str(path),'sha256':digest}
-    return masters,result
+def read_plugin(path: Path, canonical: dict[str, str], **kwargs):
+    # Lazy import keeps low-level binary helpers usable independently.
+    from .plugin_records import read_plugin as decode
+    return decode(path, canonical, **kwargs)
 
-def load_records(data: Path, plugins: list[str], progress=lambda s:None):
-    canonical={x.casefold():x for x in plugins}; seen=set(); records={}; sources=[]
-    for i,name in enumerate(plugins):
-        progress(f'插件 {i+1}/{len(plugins)}：{name}')
-        path=data/name
-        try:
-            masters,rows,source=read_plugin(path,canonical,with_source=True)
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(
-                f"无法直接打开启用插件：{path}\n"
-                "请确认使用 MO2 的运行按钮启动 Python，Data 与当前 profile 属于同一游戏实例，"
-                "并检查 MO2 右侧 Data 中是否能看到该插件。不会跳过启用的主文件。\n"
-                "可运行 tools/vha_io_probe.py 收集 open/fstat/stat 的对照结果。"
-            ) from exc
-        for m in masters:
-            if m.casefold() not in seen:
-                if m.casefold() in canonical:
-                    why = 'late-active-master'
-                    detail = '主文件已在扫描列表中，但排在依赖它的插件后面。'
-                elif readable_file(data/m):
-                    why = 'master-not-active'
-                    detail = '主文件可以打开，但未被当前 profile 或游戏根目录 Skyrim.ccc 纳入。'
-                else:
-                    why = 'master-not-visible'
-                    detail = '当前进程无法在所选虚拟 Data 中打开主文件。'
-                raise FormatError(f'{name}: {why}: {m}\n{detail} '
-                                  '扫描已停止；不会跳过依赖或自动启用普通模组。')
-        sources.append(source)
-        for row in rows:
-            key=row['id'].casefold()
-            if key in records and records[key]['type']!=row['type']:raise FormatError('form-type-conflict')
-            records[key]=row
-        seen.add(name.casefold())
-    return records,sources
+def load_records(data: Path, plugins: list[str], progress=lambda s: None, **kwargs):
+    from .plugin_records import load_records as decode
+    return decode(data, plugins, progress, **kwargs)
+
 
 def parse_tri(data: bytes, wanted: set[str]|None=None):
     if len(data)>MAX_RESOURCE:raise FormatError('TRI-size-limit')
