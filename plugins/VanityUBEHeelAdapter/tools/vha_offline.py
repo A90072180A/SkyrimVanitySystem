@@ -17,7 +17,8 @@ import threading
 import traceback
 from offline.engine import Scanner, apply_report, atomic_json, read_json, validate_user, DEFAULT_ANCHOR, VERSION, CandidateSaveError
 from offline.catalog_query import pair_plan, select_rows
-from offline.candidate_store import write_candidates
+from offline.candidate_store import write_candidates, read_candidates
+from offline.bulk_library import export_library, eligible
 from offline.shoe_groups import propose
 from vha_fileio import absolute_path
 
@@ -32,7 +33,7 @@ def gui(args, *, run_loop=True):
     mods_root=tk.StringVar(value=str(getattr(args,'mods_root',None) or ''))
     weight=tk.StringVar(value=str(args.weight));anchor=tk.StringVar(value=args.anchor)
     msg=tk.StringVar(value='在 MO2 中启动本程序。先扫描当前启用插件，再选择丝袜、计算高度建议。')
-    allow=tk.BooleanVar(value=False)
+    allow=tk.BooleanVar(value=True)
     top=ttk.Frame(root,padding=10);top.pack(fill='x')
     for row,(label,var) in enumerate((('游戏 Data 目录',data),('MO2 当前 profile 目录',profile),('MO2 mods 根目录（可空，用于来源识别）',mods_root))):
         ttk.Label(top,text=label).grid(row=row,column=0,sticky='w')
@@ -61,7 +62,7 @@ def gui(args, *, run_loop=True):
     panels=(sock_panel,shoe_panel,catalog)
     candidates=table(candidate_frame,('丝袜','鞋子','NoHeel','Heel','原计算残差','状态'),(230,230,75,75,85,220))
     actions=ttk.Frame(root,padding=10);actions.pack(fill='x')
-    q=queue.Queue();cancel=threading.Event();state={'scanner':None,'report':None,'busy':False,'reportSaved':False}
+    q=queue.Queue();cancel=threading.Event();state={'scanner':None,'report':None,'busy':False,'reportSaved':False,'reportPath':None}
     buttons=[];compute_button=None
     scope_text=tk.StringVar(value='本次计算：0 条丝袜 × 0 双鞋 = 0 对 / 上限 20,000。请分别选择；不会默认全选。')
     ttk.Label(root,textvariable=scope_text,padding=(10,3),wraplength=1300).pack(fill='x')
@@ -81,7 +82,7 @@ def gui(args, *, run_loop=True):
         anchorbox['values']=[r['key'] for r in rows if r['kind']=='footwear' and r['status']=='measurable']
         update_scope()
     def clear_candidates():
-        state['report']=None;state['reportSaved']=False
+        state['report']=None;state['reportSaved']=False;state['reportPath']=None
         children=candidates.get_children()
         if children:candidates.delete(*children)
     def browse_catalog():
@@ -158,6 +159,7 @@ def gui(args, *, run_loop=True):
         job(lambda:s.recommend(selected_anchor,keys,heel_max=args.heel_max,shoe_keys=shoe_keys),show_report)
     def show_report(r, *, saved=True):
         state['report']=r;state['reportSaved']=saved
+        if not state.get('reportPath') and state['scanner']:state['reportPath']=state['scanner'].output/'offline-candidates.json'
         children=candidates.get_children()
         if children:candidates.delete(*children)
         for row in r['entries']:
@@ -166,7 +168,7 @@ def gui(args, *, run_loop=True):
         notebook.select(candidate_frame)
         store=r.get('_storage',{})
         size=f'已无损去重保存 {store.get("bytes",0)/1024/1024:.2f} MiB' if saved else '未保存；当前结果保留在内存，请重试保存，不可应用旧报告'
-        msg.set(f'计算完成：{len(r["entries"]):,} 对；{size}。数值未舍入；游戏用户配置仍限 2048 对。')
+        msg.set(f'计算完成：{len(r["entries"]):,} 对；{size}。可导出到独立高度库（需 DLL 0.18.0）；手工配置保留。')
     def retry_save():
         r=state['report'];scanner=state['scanner']
         if not r or not scanner:return
@@ -177,11 +179,11 @@ def gui(args, *, run_loop=True):
             return r
         job(run,show_report)
     def group_preview():
-        r=state['report'];scanner=state['scanner']
-        if not r or not scanner or not state['reportSaved']:
+        r=state['report'];scanner=state['scanner'];report_path=state.get('reportPath')
+        if not r or not report_path or not state['reportSaved']:
             messagebox.showinfo('先保存结果','先计算并成功保存本次配对报告。');return
         selected=[int(x) for x in candidates.selection()] or None
-        window=tk.Toplevel(root);window.title('按鞋共享值分析（仅预览，不修改滑块）');window.geometry('1130x620')
+        window=tk.Toplevel(root);window.title('按鞋共享值分析／保存高度库（需 DLL 0.18.0）');window.geometry('1130x620')
         window.transient(root)
         opts=ttk.Frame(window,padding=8);opts.pack(fill='x')
         tolerance=tk.StringVar(value='0');cross=tk.BooleanVar(value=False)
@@ -199,7 +201,7 @@ def gui(args, *, run_loop=True):
                     raise ValueError('主窗口结果已经改变；请重新打开分组分析。')
                 g=propose(r,float(tolerance.get()),cross_family=cross.get(),indexes=selected)
                 if not g.get('sourceCandidateFileSHA256'):raise ValueError('缺少已保存报告指纹')
-                path=scanner.output/'offline-shoe-groups.json'
+                path=report_path.parent/'offline-shoe-groups.json'
                 atomic_json(path,g)
                 group_state['report']=g
                 children=tree.get_children()
@@ -222,10 +224,19 @@ def gui(args, *, run_loop=True):
         bottom=ttk.Frame(window,padding=8);bottom.pack(fill='x')
         ttk.Button(bottom,text='重新分析并保存预览',command=refresh).pack(side='left')
         ttk.Button(bottom,text='查看所选组成员／原值',command=members).pack(side='left',padx=8)
-        ttk.Label(bottom,text='不会把近似值自动写入 .user.json。单对手工值、裸脚规则不变。').pack(side='left')
+        def export_groups():
+            g=group_state['report'];ids=[int(i) for i in tree.selection()]
+            if not g or not ids:
+                messagebox.showinfo('请选择组','明确选择要保存的共享值组。',parent=window);return
+            indexes=[i for j in ids for i in g['groups'][j]['memberIndexes']]
+            if not messagebox.askyesno('共享值会改变成员的实际数值',
+                f'导出 {len(ids)} 组、{len(indexes)} 个明确成员到独立高度库？\n仅新 DLL 0.18.0 可读取。近似组会采用组代表值，并记录原值和警告；已有手工配对优先。',parent=window):return
+            start_export(indexes,g,ids)
+        ttk.Button(bottom,text='保存选中共享组到高度库',command=export_groups).pack(side='left')
+        ttk.Label(bottom,text='不改 .user.json；原值保留，近似值需明确选择。').pack(side='left')
         tree.bind('<Double-1>',lambda e:members())
         refresh()
-        window.vha={'refresh':refresh,'tolerance':tolerance,'cross':cross,'state':group_state,'tree':tree,'members':members}
+        window.vha={'refresh':refresh,'tolerance':tolerance,'cross':cross,'state':group_state,'tree':tree,'members':members,'export_groups':export_groups}
         return window
     def select_safe():
         if state['report']:
@@ -243,6 +254,32 @@ def gui(args, *, run_loop=True):
             msg.set(f'已写入 {len(result["appliedIndexes"])} 对；保留 {len(result["preservedExistingIndexes"])} 对已有设置。文件：{result["userFile"]}')
             messagebox.showinfo('已保存',msg.get()+'\n这是文件保存结果，不代表游戏已应用。')
         job(lambda:apply_report(s.output/'offline-candidates.json',plugins,indexes,review,args.user_file,expected_sha256=r.get('_storage',{}).get('sha256')),done)
+    def start_export(indexes,groups=None,group_indexes=None):
+        r=state['report'];path=state.get('reportPath')
+        if not r or not path or not state['reportSaved']:
+            messagebox.showinfo('结果尚未保存','先保存或载入有效的候选结果。');return
+        plugins=args.plugins or Path(r['data'])/'SKSE/Plugins'
+        review=allow.get()
+        def done(result):
+            msg.set(f'高度库：保存 {len(result["appliedIndexes"]):,} 对，保留 {len(result["preservedExistingIndexes"]):,} 对手工规则，'
+                    f'跳过 {len(result["skipped"]):,} 对；超误差警告 {result["warningCount"]:,}。目录：{result["library"]}')
+            messagebox.showinfo('高度库已处理',msg.get()+'\n需要 DLL 0.18.0；游戏内执行 set VHA_Reload to 1 后读取。旧 DLL 不读取此库。')
+        job(lambda:export_library(path,plugins,indexes,review,args.user_file,
+            expected_sha256=r.get('_storage',{}).get('sha256'),group_report=groups,group_indexes=group_indexes,cancelled=cancel.is_set),done)
+    def export_selected():
+        indexes=[int(i) for i in candidates.selection()]
+        if not indexes:messagebox.showinfo('尚未选择','请选择要保存的结果。');return
+        if messagebox.askyesno('保存到独立高度库（需 DLL 0.18.0）',
+            f'保存所选 {len(indexes):,} 对？不修改 .user.json，保留已有手工值。\n超误差默认保留警告使用；不支持、缺源、饱和等硬失败会跳过。'):
+            start_export(indexes)
+    def select_applicable():
+        if state['report']:candidates.selection_set([str(r['index']) for r in state['report']['entries'] if eligible(r,allow.get())])
+    def load_candidates():
+        name=filedialog.askopenfilename(title='载入已计算结果（校验来源后可导出；不用重新算几何）',filetypes=[('JSON','*.json')])
+        if not name:return
+        def done(report):
+            state['reportPath']=Path(name);show_report(report)
+        job(lambda:read_candidates(Path(name)),done)
     def adjust():
         r=state['report'];selection=candidates.selection()
         if not r or len(selection)!=1:messagebox.showinfo('选择一对','先选择一条有数值的配对。');return
@@ -264,7 +301,7 @@ def gui(args, *, run_loop=True):
                 edited.setdefault('originalSuggestion',{'NoHeel':row['NoHeel'],'Heel':row['Heel'],'status':row['status']})
                 edited.update(NoHeel=nn,Heel=hh,status='manual-adjusted',residualAtEditedValue=None)
                 next_report={**r,'entries':list(r['entries'])};next_report['entries'][edited['index']]=edited
-                write_candidates(state['scanner'].output/'offline-candidates.json',next_report)
+                write_candidates(state['reportPath'],next_report)
                 show_report(next_report);candidates.selection_set([selection[0]])
                 window.destroy()
             except Exception as ex:messagebox.showerror('未保存',str(ex),parent=window)
@@ -290,12 +327,13 @@ def gui(args, *, run_loop=True):
             except Exception as ex:messagebox.showerror('未保存',str(ex),parent=window)
         ttk.Button(window,text='保存分类',command=save_mark).pack()
     edit_actions=ttk.Frame(root,padding=(10,0));edit_actions.pack(fill='x')
-    for label,fn in (('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters)):
-        b=ttk.Button(edit_actions,text=label,command=fn);b.pack(side='left',padx=3);buttons.append(b)
-    for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择误差门槛内建议',select_safe),('3. 一键应用所选',apply)):
+    for pos,(label,fn) in enumerate((('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
+        b=ttk.Button(edit_actions,text=label,command=fn);b.grid(row=pos//4,column=pos%4,padx=3,pady=2,sticky='ew');buttons.append(b)
+    for column in range(4):edit_actions.columnconfigure(column,weight=1)
+    for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择可应用建议（含警告）',select_applicable),('3. 保存所选到高度库',export_selected)):
         b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);buttons.append(b)
         if fn==recommend:compute_button=b
-    ttk.Checkbutton(actions,text='允许本人复核过的超误差建议',variable=allow).pack(side='left',padx=8)
+    ttk.Checkbutton(actions,text='包含超误差建议（保存警告；默认启用）',variable=allow).pack(side='left',padx=8)
     ttk.Button(actions,text='取消任务',command=cancel.set).pack(side='right')
     ttk.Label(root,textvariable=msg,wraplength=1200,padding=10).pack(fill='x')
     def poll():
@@ -330,7 +368,8 @@ def gui(args, *, run_loop=True):
     root.vha={'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
               'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
               'state':state,'retry_save':retry_save,'group_preview':group_preview,'candidates':candidates,'scope':scope_text,'message':msg,
-              'compute_button':compute_button,'populate':populate,'close':close}
+              'compute_button':compute_button,'populate':populate,'close':close,
+              'export_selected':export_selected,'start_export':start_export,'load_candidates':load_candidates,'allow':allow,'select_applicable':select_applicable}
     if run_loop:root.mainloop()
     return root
 
@@ -348,10 +387,16 @@ def main():
     sub.add_parser('gui')
     scan=sub.add_parser('scan');scan.add_argument('--recommend',action='store_true');scan.add_argument('--stocking',action='append');scan.add_argument('--shoe',action='append');scan.add_argument('--all-measurable',action='store_true',help='Explicitly use all measurable items for any unspecified side')
     apply=sub.add_parser('apply');apply.add_argument('--report',type=Path,required=True);apply.add_argument('--indexes',required=True);apply.add_argument('--allow-reviewed-residual',action='store_true')
+    export=sub.add_parser('export-library');export.add_argument('--report',type=Path,required=True);export.add_argument('--indexes',required=True)
+    export.add_argument('--strict-residual',action='store_true')
     args=p.parse_args()
     if sys.version_info<(3,10):p.error('Python 3.10 or later is required')
     if args.command in (None,'gui'):gui(args);return
-    if args.command=='apply':
+    if args.command=='export-library':
+        plugins=args.plugins or (args.data/'SKSE/Plugins' if args.data else None)
+        if plugins is None:p.error('export-library requires --plugins or --data')
+        result=export_library(args.report,plugins,[int(x) for x in args.indexes.split(',')],not args.strict_residual,args.user_file)
+    elif args.command=='apply':
         plugins=args.plugins or (args.data/'SKSE/Plugins' if args.data else None)
         if plugins is None:p.error('apply requires --plugins or --data')
         result=apply_report(args.report,plugins,[int(x) for x in args.indexes.split(',')],args.allow_reviewed_residual,args.user_file)

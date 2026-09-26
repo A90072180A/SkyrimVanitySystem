@@ -87,7 +87,7 @@ class Worker {
         Json lastReport;std::optional<Input> current;
         const auto processToken=std::to_string(Now())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         Json history={{"schema",1},{"coalesced",true},{"semantics","submitted control states, not proof of visible geometry; intermediate updates may coalesce"},{"entries",Json::array()}};
-        Json inventory={{"schema",1},{"generatorVersion","0.17.0"},{"entries",Json::object()}};
+        Json inventory={{"schema",1},{"generatorVersion","0.18.0"},{"entries",Json::object()}};
         bool loadedInventory=false;
         while(!stop.stop_requested()){
             bool notify=false;
@@ -123,7 +123,7 @@ class Worker {
                     catch(...){/* diagnostic inventory is not authority */}}
                 Json ack;std::string effective;std::optional<Json> snapshot;
                 {std::scoped_lock lock(mutex);ack=acceptedRead;effective=acceptedEffective;snapshot=std::move(status);status.reset();}
-                Json receipt={{"schema",1},{"generatorVersion","0.17.0"},{"processToken",processToken},{"heartbeatUnixMs",Now()},
+                Json receipt={{"schema",1},{"generatorVersion","0.18.0"},{"processToken",processToken},{"heartbeatUnixMs",Now()},
                     {"basePath",cp::Text(locations.base)},{"userPath",cp::Text(locations.user)},{"outputDirectory",cp::Text(locations.output)},
                     {"virtualBasePath",cp::Text(locations.virtualBase)},{"virtualUserPath",cp::Text(locations.virtualUser)},
                     {"userPathMode",locations.userMode},{"fingerprintAlgorithm","fnv1a64"},{"accepted",ack},

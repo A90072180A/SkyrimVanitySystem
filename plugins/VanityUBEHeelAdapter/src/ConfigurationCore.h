@@ -20,7 +20,7 @@ inline void Fields(const Json& j,const std::set<std::string>& allowed,const std:
 inline void Validate(const Json& c){
     Require(c.is_object(),"configuration must be an object");
     Require(height_plan_core::ValidHeelLimit(HeelMax(c)),"heelMax must be finite in [1,10]");
-    for(const auto* name:{"applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","measureSurfaceCalibration","writeRuntimeState","exportStockingCalibration","enableComponentSubset"})
+    for(const auto* name:{"applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","measureSurfaceCalibration","writeRuntimeState","exportStockingCalibration","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings"})
         if(c.contains(name))Require(c.at(name).is_boolean(),std::string(name)+" must be boolean");
     for(const auto* name:{"heightMaxNormalizedResidual"})if(c.contains(name)){
         Require(c.at(name).is_number(),std::string(name)+" must be numeric");auto v=c.at(name).get<double>();
@@ -70,7 +70,7 @@ inline Json Merge(const Json& base,const Json& user){
     Fields(user,{"schema","settings","items","pairs"},"user file");
     if(user.contains("schema"))Require(user.at("schema")==1,"unsupported user schema");
     if(user.contains("settings")){
-        Fields(user.at("settings"),{"heelMax","heightMaxNormalizedResidual","applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","exportStockingCalibration","writeRuntimeState","enableComponentSubset"},"user settings");
+        Fields(user.at("settings"),{"heelMax","heightMaxNormalizedResidual","applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","exportStockingCalibration","writeRuntimeState","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings"},"user settings");
         for(auto i=user.at("settings").begin();i!=user.at("settings").end();++i)result[i.key()]=i.value();
     }
     if(user.contains("items")){

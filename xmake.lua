@@ -57,7 +57,7 @@ target("SkyrimVanitySystem")
     set_pcxxheader("src/pch.h")
 
 target("VanityUBEHeelAdapter")
-    set_version("0.17.0")
+    set_version("0.18.0")
     -- Must be defined before the plugin PCH includes Windows headers.
     -- Standalone algorithm tests previously missed the DLL's min/max collision.
     add_defines("NOMINMAX")
@@ -99,4 +99,12 @@ target("ConfigurationTests")
     add_defines("NOMINMAX")
     add_packages("nlohmann_json")
     add_files("plugins/VanityUBEHeelAdapter/tests/ConfigurationTests.cpp")
+target_end()
+
+-- The actual portable large-library reader/worker, no Skyrim dependencies.
+target("BulkHeightLibraryTests")
+    set_kind("binary")
+    set_languages("c++20")
+    add_defines("NOMINMAX")
+    add_files("plugins/VanityUBEHeelAdapter/tests/BulkHeightLibraryTests.cpp")
 target_end()

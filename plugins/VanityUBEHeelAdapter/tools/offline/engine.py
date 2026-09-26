@@ -19,7 +19,7 @@ from .provenance import annotate
 from .shoe_groups import response_info
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.17.0-offline6'
+VERSION='0.18.0'
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
@@ -448,7 +448,7 @@ def validate_user(user,maximum=2.):
     if not isinstance(user,dict) or set(user)-{'schema','settings','items','pairs'} or user.get('schema',1)!=1:
         raise ValueError('invalid user overlay schema/fields')
     settings=user.get('settings',{})
-    booleans={'applyMorph','automaticHeight','autoDetectStockings','barefootFlatFeet','allowHeightEndpointApproximation','exportFootGeometry','exportStockingCalibration','writeRuntimeState','enableComponentSubset'}
+    booleans={'applyMorph','automaticHeight','autoDetectStockings','barefootFlatFeet','allowHeightEndpointApproximation','exportFootGeometry','exportStockingCalibration','writeRuntimeState','enableComponentSubset','useOfflineHeightLibrary','applyHeightResidualWarnings'}
     if not isinstance(settings,dict) or set(settings)-booleans-{'heelMax','heightMaxNormalizedResidual'}:raise ValueError('unknown user setting')
     for k,v in settings.items():
         if k in booleans and not isinstance(v,bool):raise ValueError('setting must be boolean: '+k)

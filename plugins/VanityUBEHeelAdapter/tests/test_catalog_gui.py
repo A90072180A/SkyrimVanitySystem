@@ -52,6 +52,38 @@ class GuiTests(unittest.TestCase):
 
     def scan(self):self.app['scan']();self.wait()
 
+    def test_primary_bulk_export_keeps_user_overlay_empty(self):
+        from offline.bulk_library import decode_index
+        self.scan();stock,shoe,_=self.app['panels'];stock.select_filtered();shoe.select_filtered()
+        self.app['recommend']();self.wait()
+        self.assertTrue(self.app['allow'].get())
+        self.app['select_applicable']();self.app['export_selected']();self.wait()
+        index=self.root/'dest/VanityUBEHeelAdapter/height-library/index.vhi'
+        doc=decode_index(index.read_bytes())
+        self.assertEqual(sum(e['count'] for e in doc['entries']),2)
+        self.assertFalse((self.root/'dest/VanityUBEHeelAdapter.user.json').exists())
+
+    def test_load_saved_candidates_can_export_without_rescan(self):
+        self.scan();stock,shoe,_=self.app['panels'];stock.select_filtered();shoe.select_filtered()
+        self.app['recommend']();self.wait();path=self.app['state']['reportPath']
+        self.app['state'].update(scanner=None,report=None,reportSaved=False,reportPath=None)
+        with mock.patch('tkinter.filedialog.askopenfilename',return_value=str(path)):
+            self.app['load_candidates']();self.wait()
+        self.assertIsNone(self.app['state']['scanner'])
+        self.app['select_applicable']();self.app['export_selected']();self.wait()
+        self.assertTrue((self.root/'dest/VanityUBEHeelAdapter/height-library/index.vhi').exists())
+
+    def test_shared_group_button_exports_actual_members(self):
+        from offline.bulk_library import decode_index, decode_shard
+        self.scan();stock,shoe,_=self.app['panels'];stock.select_filtered();shoe.select_filtered()
+        self.app['recommend']();self.wait()
+        group=self.app['group_preview']();group.update();g=group.vha
+        g['tree'].selection_set([str(r['groupIndex']) for r in g['state']['report']['groups']])
+        g['export_groups']();self.wait();group.destroy()
+        folder=self.root/'dest/VanityUBEHeelAdapter/height-library'
+        index=decode_index((folder/'index.vhi').read_bytes())
+        self.assertEqual(sum(len(decode_shard((folder/e['file']).read_bytes())['members']) for e in index['entries']),2)
+
     def test_scope_compute_apply_and_anchor_not_target(self):
         self.scan();stock,shoe,_=self.app['panels']
         self.assertEqual(str(self.app['compute_button']['state']),'disabled')

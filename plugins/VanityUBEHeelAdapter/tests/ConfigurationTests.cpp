@@ -23,6 +23,18 @@ int main(){
     {auto j=user;j["pairs"][0]["approval"]=Json::object();refuse(j);}
     {auto j=user;j["pairs"][0]={{"stocking","Sock.esp|00000001"},{"footwear","<barefoot>"},{"mode","ignore"}};Check(configuration_core::Merge(base,j)["manualPairs"][0]["mode"]=="ignore");}
     {auto j=user;j["settings"]["heelMax"]=5;j["pairs"][0]["Heel"]=3.5;Check(configuration_core::Merge(base,j)["manualPairs"][0]["Heel"]==3.5);}
+    for (const auto* key : {"useOfflineHeightLibrary", "applyHeightResidualWarnings"}) {
+        for (bool value : {false, true}) {
+            auto j=user; j["settings"][key]=value;
+            Check(configuration_core::Merge(base,j).at(key)==value);
+        }
+        for (const auto& value : {Json("false"), Json(1), Json(nullptr)}) {
+            auto j=user; j["settings"][key]=value; refuse(j);
+        }
+        auto b=base; b[key]="true";
+        bool bad=false; try { configuration_core::Validate(b); } catch (...) { bad=true; }
+        Check(bad);
+    }
     configuration_core::Debounce db;Check(!db.Ready("a"));Check(db.Ready("a"));Check(!db.Ready("a"));Check(!db.Ready("b"));Check(!db.Ready("c"));Check(db.Ready("c"));Check(!db.Ready("c"));
     for(int i=0;i<100;++i){auto c=configuration_core::Merge(base,user);Check(c["manualPairs"].size()==1);Check(c["manualPairs"][0]["Heel"]==1.1068);}
     std::cout<<checks<<" configuration checks passed\n";
