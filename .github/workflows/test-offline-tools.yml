@@ -44,4 +44,5 @@ jobs:
         run: xvfb-run -a python plugins/VanityUBEHeelAdapter/tests/test_library_browser.py
         env:
           VHA_REQUIRE_TK: '1'
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_mesh_partition_prep.py
       - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools
