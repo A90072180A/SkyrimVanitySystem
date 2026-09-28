@@ -36,4 +36,12 @@ jobs:
         run: xvfb-run -a python plugins/VanityUBEHeelAdapter/tests/test_catalog_gui.py
         env:
           VHA_REQUIRE_TK: '1'
+      - if: runner.os == 'Windows'
+        run: python plugins/VanityUBEHeelAdapter/tests/test_library_browser.py
+        env:
+          VHA_REQUIRE_TK: '1'
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a python plugins/VanityUBEHeelAdapter/tests/test_library_browser.py
+        env:
+          VHA_REQUIRE_TK: '1'
       - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools

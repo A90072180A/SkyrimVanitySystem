@@ -27,7 +27,7 @@ def gui(args, *, run_loop=True):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     from offline.catalog_widget import CatalogPanel
-    root=tk.Tk();root.title('VHA 离线高度扫描 / '+VERSION);root.geometry('1380x920');root.minsize(1120,820)
+    root=tk.Tk();root.title('VHA 离线高度扫描 / '+VERSION+' / library1');root.geometry('1380x920');root.minsize(1120,820)
     data=tk.StringVar(value=str(args.data or ''))
     profile=tk.StringVar(value=str(args.profile or ''))
     mods_root=tk.StringVar(value=str(getattr(args,'mods_root',None) or ''))
@@ -326,8 +326,22 @@ def gui(args, *, run_loop=True):
                 validate_user(e.user,e.maximum);e.save();msg.set('已保存分类：'+str(e.path));window.destroy()
             except Exception as ex:messagebox.showerror('未保存',str(ex),parent=window)
         ttk.Button(window,text='保存分类',command=save_mark).pack()
+    def browse_saved_library():
+        from vha_library import gui as library_gui
+        from offline.bulk_library import identity
+        current_rows=catalog.model.rows
+        selected_keys=set(shoe_panel.selected_keys())
+        chosen=set()
+        for row in current_rows:
+            if row.get('key') in selected_keys:
+                try:chosen.add(identity(row['armor'],row['addon'],row['model']))
+                except (KeyError,TypeError,ValueError):pass
+        d=Path(data.get()) if data.get().strip() else None
+        options=argparse.Namespace(library=None, plugins=args.plugins or (d/'SKSE/Plugins' if d else None),
+            user_file=args.user_file, data=d, shoe='')
+        return library_gui(options,parent=root,rows=current_rows,selected=chosen,run_loop=False)
     edit_actions=ttk.Frame(root,padding=(10,0));edit_actions.pack(fill='x')
-    for pos,(label,fn) in enumerate((('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
+    for pos,(label,fn) in enumerate((('浏览已保存高度库',browse_saved_library),('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
         b=ttk.Button(edit_actions,text=label,command=fn);b.grid(row=pos//4,column=pos%4,padx=3,pady=2,sticky='ew');buttons.append(b)
     for column in range(4):edit_actions.columnconfigure(column,weight=1)
     for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择可应用建议（含警告）',select_applicable),('3. 保存所选到高度库',export_selected)):
@@ -366,7 +380,7 @@ def gui(args, *, run_loop=True):
     root.protocol('WM_DELETE_WINDOW',close);root.after(100,poll)
     # Test seam uses the same widgets/actions as the shipped entry point.
     root.vha={'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
-              'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
+              'browse_saved_library':browse_saved_library,'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
               'state':state,'retry_save':retry_save,'group_preview':group_preview,'candidates':candidates,'scope':scope_text,'message':msg,
               'compute_button':compute_button,'populate':populate,'close':close,
               'export_selected':export_selected,'start_export':start_export,'load_candidates':load_candidates,'allow':allow,'select_applicable':select_applicable}
