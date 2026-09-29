@@ -108,13 +108,34 @@ class Editor:
     def mark(self, armor: str, kind: str, note: str = "", addon: str | None = None) -> None:
         if not ID.fullmatch(armor) or kind not in ("stocking", "footwear", "ignore", "auto"):
             raise ValueError("Invalid stable armor ID or classification")
+        previous = next((dict(v) for v in self.user.get("items", []) if v["armor"] == armor), None)
         rows = [v for v in self.user.get("items", []) if v["armor"] != armor]
         if kind != "auto":
             row = {"armor": armor, "kind": kind, "note": note}
+            if previous and kind == "footwear" and previous.get("coverage") in ("preserve", "opaque-closed"):
+                row["coverage"] = previous["coverage"]
             if addon:
                 if not ID.fullmatch(addon):
                     raise ValueError("Invalid addon ID")
                 row["addons"] = [addon]
+            rows.append(row)
+        self.user["items"] = rows
+
+    def set_coverage(self, armor: str, coverage: str) -> None:
+        if not ID.fullmatch(armor) or coverage not in ("preserve", "opaque-closed", "auto"):
+            raise ValueError("Invalid stable armor ID or coverage")
+        previous = next((dict(v) for v in self.user.get("items", []) if v["armor"] == armor), None)
+        rows = [v for v in self.user.get("items", []) if v["armor"] != armor]
+        if coverage == "auto":
+            if previous:
+                previous.pop("coverage", None)
+                if previous.get("kind"):
+                    rows.append(previous)
+        else:
+            row = previous or {"armor": armor, "kind": "footwear", "note": ""}
+            if row.get("kind") != "footwear":
+                raise ValueError("Coverage can only be assigned to footwear")
+            row["coverage"] = coverage
             rows.append(row)
         self.user["items"] = rows
 
@@ -242,6 +263,11 @@ def gui(plugins: Path, user_file: Path | None) -> None:
     ttk.Button(row,text="无鞋",command=lambda:shoe.set("<barefoot>")).pack(side="left")
     for text,kind in (("标记丝袜","stocking"),("标记鞋子","footwear"),("忽略该装备","ignore"),("恢复自动分类","auto")):
         ttk.Button(row,text=text,command=lambda k=kind:act(lambda e:e.mark(chosen()[0],k,addon=chosen()[1] if k=="stocking" else None))).pack(side="left")
+    row=ttk.Frame(frame);row.pack(fill="x")
+    ttk.Label(row,text="鞋面覆盖：").pack(side="left")
+    ttk.Button(row,text="不透明包脚",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"opaque-closed"))).pack(side="left")
+    ttk.Button(row,text="透明/露趾/未知",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"preserve"))).pack(side="left")
+    ttk.Button(row,text="清除覆盖标记",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"auto"))).pack(side="left")
     for label,var in (("丝袜 ID",stock),("鞋 ID",shoe),("NoHeel [0,1]",n),("Heel [0,heelMax]",h),("备注",note)):
         r=ttk.Frame(frame);r.pack(fill="x");ttk.Label(r,text=label,width=23).pack(side="left");ttk.Entry(r,textvariable=var).pack(side="left",fill="x",expand=True)
     row=ttk.Frame(frame);row.pack(fill="x",pady=8)
@@ -275,6 +301,7 @@ def main() -> None:
     for cmd in ("status","list","candidates","gui"):sub.add_parser(cmd)
     mark=sub.add_parser("mark");mark.add_argument("armor");mark.add_argument("kind",choices=["stocking","footwear","ignore","auto"]);mark.add_argument("--addon");mark.add_argument("--note",default="")
     pair=sub.add_parser("set");pair.add_argument("stocking");pair.add_argument("footwear");pair.add_argument("--noheel",type=float,default=0);pair.add_argument("--heel",type=float,default=0);pair.add_argument("--mode",choices=["manual","ignore","auto"],default="manual");pair.add_argument("--note",default="")
+    cov=sub.add_parser("coverage");cov.add_argument("armor");cov.add_argument("value",choices=["preserve","opaque-closed","auto"])
     approve=sub.add_parser("approve");approve.add_argument("index",type=int)
     args=parser.parse_args()
     if args.command=="gui":gui(args.plugins,args.user_file);return
@@ -284,6 +311,7 @@ def main() -> None:
         print(json.dumps(result,indent=2,ensure_ascii=False));return
     if args.command=="mark":e.mark(args.armor,args.kind,args.note,args.addon)
     elif args.command=="set":e.set_pair(args.stocking,args.footwear,args.noheel,args.heel,args.note,args.mode)
+    elif args.command=="coverage":e.set_coverage(args.armor,args.value)
     elif args.command=="approve":e.approve(args.index)
     e.save();print(f"Saved {e.path}; fingerprint={e.saved_fingerprint}. Waiting for a game receipt; a file save is not proof of hot reload.")
 

@@ -9,6 +9,8 @@ int main(){
     Json user={{"schema",1},{"settings",{{"heelMax",2.0}}},{"pairs",Json::array({{{"stocking","Sock.esp|00000001"},{"footwear","Shoe.esp|00000001"},{"NoHeel",0.0},{"Heel",1.1068}}})},
         {"items",Json::array({{{"armor","Sock.esp|00000001"},{"kind","stocking"},{"note","test"}}})}};
     merged=configuration_core::Merge(base,user);Check(merged["manualPairs"][0]["Heel"]==1.1068);Check(merged["manualItemKinds"]["Sock.esp|00000001"]=="stocking");
+    {auto j=user;j["items"].push_back({{"armor","Shoe.esp|00000002"},{"kind","footwear"},{"coverage","opaque-closed"}});auto m=configuration_core::Merge(base,j);Check(m["manualFootwearCoverage"]["Shoe.esp|00000002"]=="opaque-closed");}
+    {auto j=user;j["items"].push_back({{"armor","Shoe.esp|00000002"},{"kind","footwear"},{"coverage","preserve"}});Check(configuration_core::Merge(base,j)["manualFootwearCoverage"]["Shoe.esp|00000002"]=="preserve");}
     config_state::Set(merged);const auto last=config_state::Get();
     auto refuse=[&](Json value){bool bad=false;try{config_state::Set(configuration_core::Merge(base,value));}catch(...){bad=true;}Check(bad);Check(config_state::Get()==last);};
     for(double n:{-0.1,1.001,double(INFINITY),double(NAN)}){auto j=user;j["pairs"][0]["NoHeel"]=n;refuse(j);}
@@ -17,13 +19,15 @@ int main(){
     {auto j=user;j["pairs"][0]["NoHeel"]=0.2;refuse(j);}
     {auto j=user;j["pairs"].push_back(j["pairs"][0]);refuse(j);}
     {auto j=user;j["items"].push_back(j["items"][0]);refuse(j);}
+    {auto j=user;j["items"][0]["coverage"]="opaque-closed";refuse(j);}
+    {auto j=user;j["items"].push_back({{"armor","Shoe.esp|00000002"},{"kind","footwear"},{"coverage","invalid"}});refuse(j);}
     {auto j=user;j["settings"]["HeelMax"]=4;refuse(j);}
     {auto j=user;j["schema"]=2;refuse(j);}
     {auto j=user;j["pairs"][0]["stocking"]="runtime:FE123456";refuse(j);}
     {auto j=user;j["pairs"][0]["approval"]=Json::object();refuse(j);}
     {auto j=user;j["pairs"][0]={{"stocking","Sock.esp|00000001"},{"footwear","<barefoot>"},{"mode","ignore"}};Check(configuration_core::Merge(base,j)["manualPairs"][0]["mode"]=="ignore");}
     {auto j=user;j["settings"]["heelMax"]=5;j["pairs"][0]["Heel"]=3.5;Check(configuration_core::Merge(base,j)["manualPairs"][0]["Heel"]==3.5);}
-    for (const auto* key : {"useOfflineHeightLibrary", "applyHeightResidualWarnings"}) {
+    for (const auto* key : {"useOfflineHeightLibrary", "applyHeightResidualWarnings", "enableStockingFootOcclusion"}) {
         for (bool value : {false, true}) {
             auto j=user; j["settings"][key]=value;
             Check(configuration_core::Merge(base,j).at(key)==value);

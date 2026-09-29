@@ -24,6 +24,14 @@ class Tests(unittest.TestCase):
   for a,b in [(1.1,0),(0,2.1),(0,float('nan')),(.1,.1)]:
    with self.assertRaises(ValueError):e.set_pair('Sock.esp|00000001','Shoe.esp|00000002',a,b)
   self.assertFalse(e.path.exists())
+ def test_coverage_marks(self):
+  e=m.Editor(self.path);e.mark('Shoe.esp|00000002','footwear',note='shoe');e.set_coverage('Shoe.esp|00000002','opaque-closed');e.save()
+  e=m.Editor(self.path);self.assertEqual(e.user['items'][0]['coverage'],'opaque-closed')
+  e.mark('Shoe.esp|00000002','footwear',note='updated');self.assertEqual(e.user['items'][0]['coverage'],'opaque-closed')
+  e.set_coverage('Shoe.esp|00000002','preserve');self.assertEqual(e.user['items'][0]['coverage'],'preserve')
+  e.set_coverage('Shoe.esp|00000002','auto');self.assertNotIn('coverage',e.user['items'][0])
+  e.mark('Sock.esp|00000001','stocking')
+  with self.assertRaises(ValueError):e.set_coverage('Sock.esp|00000001','opaque-closed')
  def test_ignore_auto_mark(self):
   e=m.Editor(self.path);e.mark('Sock.esp|00000001','ignore');e.set_pair('Sock.esp|00000001','<barefoot>',0,0,mode='ignore');e.save()
   e=m.Editor(self.path);e.mark('Sock.esp|00000001','auto');e.set_pair('Sock.esp|00000001','<barefoot>',0,0,'','auto');e.save()

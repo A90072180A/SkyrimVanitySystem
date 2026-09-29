@@ -28,14 +28,14 @@
     "[Caenarvon] Cosplay Basics.esp|00000D1A"
   ],
   "heels": {
-    "[AFxII] Converse AS.esp|0000080A": 1.0
+    "[AFxII] Converse AS.esp|0000080A": 1
   },
   "stockingMorphProfiles": [],
   "measureSurfaceCalibration": true,
   "surfaceCalibrationReference": {
     "armor": "[AFxII] Converse AS.esp|0000080A",
     "addon": "[AFxII] Converse AS.esp|00000809",
-    "noHeel": 1.0
+    "noHeel": 1
   },
   "measureStockingClearance": false,
   "writeStockingFitPreview": false,
@@ -44,7 +44,8 @@
   "allowHeightEndpointApproximation": false,
   "signedHeightOverrides": [],
   "barefootFlatFeet": true,
-  "heelMax": 2.0,
+  "heelMax": 2,
   "writeRuntimeState": true,
-  "enableComponentSubset": true
+  "enableComponentSubset": true,
+  "enableStockingFootOcclusion": true
 }

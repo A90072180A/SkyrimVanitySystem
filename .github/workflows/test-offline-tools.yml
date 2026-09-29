@@ -45,4 +45,5 @@ jobs:
         env:
           VHA_REQUIRE_TK: '1'
       - run: python plugins/VanityUBEHeelAdapter/tests/test_mesh_partition_prep.py
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_cpb_occlusion_prep.py
       - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools
