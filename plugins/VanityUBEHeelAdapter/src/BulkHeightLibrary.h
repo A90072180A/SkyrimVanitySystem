@@ -13,6 +13,9 @@ namespace vanity_ube_heel_adapter::bulk_height {
 struct Identity { std::string armor, addon, model; bool operator==(const Identity&) const = default; };
 struct Controls { double noHeel{}, heel{}; };
 struct Asset { std::string resource; std::uint64_t fingerprint{}; };
+// Explicit equivalence supplied only by the verified prepared-asset integration.
+// Old and new bytes are still independently fingerprint-bound; no wildcard.
+struct SourceAlias {Asset before,after;};
 struct Member {
     Identity stocking; std::uint32_t group{}, flags{};
     double originalNoHeel{}, originalHeel{}, residual{};
@@ -34,10 +37,11 @@ struct Request {
     std::string context;
     double weight{}, heelMax{2.0};
     bool allowResidualWarnings{true};
+    std::vector<SourceAlias> sourceAliases{};
 };
 struct Reply {
     std::string state{"pending"}, generation, detail;
-    Controls values; double originalResidual{}; std::uint32_t flags{};
+    Controls values; double originalResidual{}; std::uint32_t flags{},migratedSources{};
     bool Ready() const { return state=="ready"; }
 };
 struct Stats {std::uint64_t indexReads{},shardReads{},assetReads{};};

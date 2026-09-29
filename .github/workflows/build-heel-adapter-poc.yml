@@ -50,7 +50,7 @@ jobs:
           ./stocking-occlusion-tests
       - name: Validate extended heights and exact component subset correspondence
         run: |
-          for test in ExtendedHeightTests TopologySubsetTests; do
+          for test in ExtendedHeightTests TopologySubsetTests PreparedCpbCoreTests BulkHeightMigrationTests; do
             g++ -std=c++20 -O1 -g -fsanitize=address,undefined plugins/VanityUBEHeelAdapter/tests/$test.cpp -o "$test"
             ./"$test"
           done
@@ -62,7 +62,7 @@ jobs:
         run: |
           mkdir -p test-deps/nlohmann
           curl --fail --location --retry 3 https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp -o test-deps/nlohmann/json.hpp
-          for test in ConfigurationTests RuntimeConfigurationTests HeightProfileCacheTests; do
+          for test in ConfigurationTests RuntimeConfigurationTests HeightProfileCacheTests PreparedCpbTests; do
             g++ -std=c++20 -O0 -g -fsanitize=address,undefined -Itest-deps plugins/VanityUBEHeelAdapter/tests/$test.cpp -o "$test"
             ./"$test"
           done
@@ -96,7 +96,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $vs) { throw 'MSVC installation not found' }
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests','BarefootPolicyTests','StockingOcclusionPolicyTests','ExtendedHeightTests','TopologySubsetTests')
+          $tests = @('FootSnapshotCoreTests','TriMorphCoreTests','FootCapturePolicyTests','NifSourceCoreTests','SurfacePostureCoreTests','StockingClearanceCoreTests','HeightPlanTests','BarefootPolicyTests','StockingOcclusionPolicyTests','ExtendedHeightTests','TopologySubsetTests','PreparedCpbCoreTests','BulkHeightMigrationTests')
           foreach ($test in $tests) {
             cmd.exe /c "`"$vcvars`" && cl /nologo /EHsc /std:c++20 /W4 /DNOMINMAX /FIWindows.h plugins\VanityUBEHeelAdapter\tests\$test.cpp /Fe:$test.exe && $test.exe"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -112,7 +112,7 @@ jobs:
       - name: Validate full configuration and file workers on Windows
         shell: pwsh
         run: |
-          foreach ($test in @('ConfigurationTests','RuntimeConfigurationTests')) {
+          foreach ($test in @('ConfigurationTests','RuntimeConfigurationTests','PreparedCpbTests')) {
             xmake build -y $test
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             & "build/runtime/flat/windows/x64/releasedbg/$test.exe"
@@ -149,7 +149,7 @@ jobs:
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/vha_offline.py' 'artifact/tools/vha_offline.py'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/*' 'artifact/tools/' -Recurse -Force
           Copy-Item 'plugins/VanityUBEHeelAdapter/BULK-LIBRARY-0.18.0.md' 'artifact/BULK-LIBRARY-0.18.0.md'
-          Copy-Item 'plugins/VanityUBEHeelAdapter/OCCLUSION-0.19.0.md' 'artifact/OCCLUSION-0.19.0.md'
+          Copy-Item 'plugins/VanityUBEHeelAdapter/CPB-SURFACE-0.19.1.md' 'artifact/CPB-SURFACE-0.19.1.md'
           python plugins/VanityUBEHeelAdapter/tools/build_command_plugin.py --out artifact/VanityUBEHeelAdapter.Commands.esp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item 'plugins/VanityUBEHeelAdapter/OFFLINE-0.17.0.md' 'artifact/OFFLINE-0.17.0.md'
@@ -157,7 +157,7 @@ jobs:
           Copy-Item 'plugins/VanityUBEHeelAdapter/FIXES-0.16.1.md' 'artifact/FIXES-0.16.1.md'
           Copy-Item 'plugins/VanityUBEHeelAdapter/tools/audit_foot_snapshots.py' 'artifact/tools/audit_foot_snapshots.py'
           @{
-            version = '0.19.0'
+            version = '0.19.1'
             commit = $env:GITHUB_SHA
             dllSha256 = (Get-FileHash 'artifact/SKSE/Plugins/VanityUBEHeelAdapter.dll' -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -Encoding utf8 'artifact/BUILD.json'

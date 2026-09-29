@@ -9,6 +9,7 @@
 #include "BarefootPolicy.h"
 #include "FootCapturePolicy.h"
 #include "StockingOcclusionPolicy.h"
+#include "PreparedCpb.h"
 #include "api/SkyrimVanitySystemAPI.h"
 #include <nlohmann/json.hpp>
 #include <condition_variable>
@@ -35,6 +36,16 @@ std::mutex updateMutex;
 bool loggedUnavailable=false,registered=false;
 struct Application {RE::NiPointer<RE::NiAVObject> object;std::string desired,stamp;std::uint64_t dirty{};};
 std::map<std::uintptr_t,Application> applications;
+struct HiddenFoot {RE::NiPointer<RE::NiAVObject> object;prepared_cpb::VisibilityLease lease;};
+std::map<std::uintptr_t,HiddenFoot> hiddenFeet;
+void RestoreVisibility(const std::set<std::uintptr_t>& claimed){
+    for(auto it=hiddenFeet.begin();it!=hiddenFeet.end();){
+        if(claimed.contains(it->first)){++it;continue;}
+        if(racemenu::IsLive(it->second.object.get()))
+            if(auto desired=it->second.lease.Release(it->second.object->GetAppCulled()))it->second.object->SetAppCulled(*desired);
+        it=hiddenFeet.erase(it);
+    }
+}
 barefoot_policy::Settler barefootSettler;
 std::map<std::string,std::string> lastDecision;
 void DecisionLog(const std::string& key,const std::string& message){
@@ -122,7 +133,7 @@ std::vector<Live> MatchLive(const std::vector<Visual>& visuals,const std::vector
             std::vector<std::pair<RE::NiAVObject*,std::string>> matches;
             RE::BSVisit::TraverseScenegraphObjects(p.partClone.get(),[&](RE::NiAVObject*n){
                 auto* extra=n->GetExtraData<RE::NiStringExtraData>("BODYTRI");
-                if(extra&&extra->value&&Stem(extra->value)==stem)matches.emplace_back(n,extra->value);
+                if(extra&&extra->value&&(Stem(extra->value)==stem||prepared_cpb::ResourceMatches(v.model,extra->value)))matches.emplace_back(n,extra->value);
                 return RE::BSVisit::BSVisitControl::kContinue;
             });
             if(matches.empty())continue;
@@ -135,6 +146,16 @@ std::vector<Live> MatchLive(const std::vector<Visual>& visuals,const std::vector
             }
             if(outer.empty())continue;
             RE::NiAVObject* root=outer.size()==1?outer.front().first:p.partClone.get();
+            if(prepared_cpb::ResourceMatches(v.model,outer.front().second)){
+                // Smallest common subtree; never morph an unrelated biped clone.
+                root=outer.front().first;
+                for(const auto& other:outer){
+                    while(root){bool contains=false;for(auto* n=other.first;n;n=n->parent)if(n==root){contains=true;break;}
+                        if(contains)break;root=root->parent;}
+                    if(!root)break;
+                }
+                if(!root)continue;
+            }
             candidates.try_emplace(reinterpret_cast<std::uintptr_t>(root),
                 Live{v,RE::NiPointer<RE::NiAVObject>(root),outer.front().second});
         }
@@ -157,6 +178,19 @@ bool Capable(const Live&target,const height_profiles::Capability&cap,hp::Control
     // RaceMenu applies every shape record when its root is a BSGeometry. Do not
     // send a multi-shape TRI through that route. Nodes use exact shape names.
     if(target.root->AsGeometry()&&cap.shapes.size()!=1)return false;
+    if(prepared_cpb::ResourceMatches(target.visual.model,target.tri)){
+        const auto prepared=prepared_cpb::Current();
+        if(!prepared->ready||cap.fingerprint!=prepared->triFingerprint||cap.shapes.size()!=2||target.root->AsGeometry())return false;
+        std::vector<prepared_cpb::Shape> shapes;
+        RE::BSVisit::TraverseScenegraphGeometries(target.root.get(),[&](RE::BSGeometry* g){
+            const std::string name=g->name.c_str()?g->name.c_str():"";
+            prepared_cpb::Shape shape{name,0,0,false,false};
+            auto* skin=g->GetGeometryRuntimeData().skinInstance.get();auto* part=skin?skin->skinPartition.get():nullptr;
+            if(part)shape.vertices=part->vertexCount;
+            for(const auto& c:cap.shapes)if(c.name==name){shape.maxIndex=c.maxIndex;shape.noHeel=c.noHeel;shape.heel=c.heel;}
+            shapes.push_back(std::move(shape));return RE::BSVisit::BSVisitControl::kContinue;
+        });return prepared_cpb::CompleteShapes(shapes);
+    }
     bool n=false,h=false;
     RE::BSVisit::TraverseScenegraphGeometries(target.root.get(),[&](RE::BSGeometry*g){
         auto*skin=g->GetGeometryRuntimeData().skinInstance.get();auto*part=skin?skin->skinPartition.get():nullptr;
@@ -170,18 +204,26 @@ bool Capable(const Live&target,const height_profiles::Capability&cap,hp::Control
     });
     return (n||h)&&(values.noHeel==0||n)&&(values.heel==0||h);
 }
-struct OcclusionResult {bool prepared{},hidden{},changed{};};
-OcclusionResult SetPreparedFootOcclusion(const Live& stock,const bool hide){
-    OcclusionResult out;
-    RE::BSVisit::TraverseScenegraphGeometries(stock.root.get(),[&](RE::BSGeometry*g){
-        if(!g||std::string_view(g->name.c_str()?g->name.c_str():"")!="VHA_CPB_CoveredFoot")
-            return RE::BSVisit::BSVisitControl::kContinue;
-        out.prepared=true;const bool before=g->GetAppCulled();
-        if(before!=hide){g->SetAppCulled(hide);out.changed=true;}
-        out.hidden=hide;return RE::BSVisit::BSVisitControl::kContinue;
-    });
-    if(out.changed)logger::info("[stocking occlusion] stocking='{}' prepared=true hidden={}",stock.visual.armorID,hide);
-    return out;
+bool HidePreparedFoot(const Live& stock,std::set<std::uintptr_t>& claimed){
+    bool hidden=false;
+    RE::BSVisit::TraverseScenegraphGeometries(stock.root.get(),[&](RE::BSGeometry* g){
+        if(!g||std::string_view(g->name.c_str()?g->name.c_str():"")!=prepared_cpb::FootShape)return RE::BSVisit::BSVisitControl::kContinue;
+        const auto id=reinterpret_cast<std::uintptr_t>(g);
+        auto it=hiddenFeet.try_emplace(id,HiddenFoot{RE::NiPointer<RE::NiAVObject>(g),{}}).first;
+        if(auto value=it->second.lease.Hide(g->GetAppCulled()))g->SetAppCulled(*value);
+        claimed.insert(id);hidden=g->GetAppCulled();return RE::BSVisit::BSVisitControl::kContinue;
+    });return hidden;
+}
+bool PreparedContext(const std::string& context,const std::vector<std::string>& blocked){
+    try{const auto c=Json::parse(context);if(!c.is_array()||c.size()!=4||!c.at(3).is_array())return false;
+        std::vector<prepared_cpb::MorphValue> values;
+        for(const auto& m:c.at(3))values.push_back({m.at("name").get<std::string>(),m.at("value").get<double>()});
+        return prepared_cpb::ContextSafe(c.at(2).get<double>(),c.at(1).get<unsigned>(),values,blocked);
+    }catch(...){return false;}
+}
+bool PreserveOverride(const std::string& id){
+    const auto it=config.find("manualFootwearCoverage");if(it==config.end()||!it->is_object())return false;
+    const auto mark=it->find(id);return mark!=it->end()&&*mark=="preserve";
 }
 struct Plan {hp::Controls values;std::string authority;Json metadata=Json::object();};
 std::optional<Plan> UserPair(const Live& stock,const std::string& shoe,const std::string& shoeAddon,const std::string& context,const height_profiles::Capability& cap){
@@ -229,12 +271,16 @@ std::optional<Plan> OfflineLibrary(const Live& stock,const Live& shoe,const std:
         bulk_height::Request request{{shoe.visual.armorID,shoe.visual.addonID,shoe.visual.model},
             {stock.visual.armorID,stock.visual.addonID,stock.visual.model},context,
             actor.at(2).get<double>(),HeelMax(),Bool("applyHeightResidualWarnings",true)};
+        if(prepared_cpb::ResourceMatches(stock.visual.model,stock.tri)){
+            const auto prepared=prepared_cpb::Current();
+            if(prepared->ready)request.sourceAliases=prepared->aliases;
+        }
         auto reply=bulk_height::Lookup(std::move(request));
         // Missing libraries/entries allow the established automatic path. A
         // selected but invalid/pending library entry is not silently replaced.
         if(reply.state=="unavailable"||reply.state=="not-found")return {};
         Json info={{"state",reply.state},{"generation",reply.generation},{"flags",reply.flags},
-            {"originalResidual",reply.originalResidual},{"detail",reply.detail},
+            {"originalResidual",reply.originalResidual},{"detail",reply.detail},{"migratedSources",reply.migratedSources},
             {"offlineBaselineOnly",true},{"sharedValueApproximation",(reply.flags&2)!=0},{"residualWarning",(reply.flags&1)!=0},
             {"residualAtAppliedValue",(reply.flags&6)?Json(nullptr):Json(reply.originalResidual)}};
         if(!reply.Ready())return Plan{{NAN,NAN},"offline-library-"+reply.state,std::move(info)};
@@ -362,9 +408,9 @@ void RestoreUnclaimed(RE::Actor*player,const std::set<std::uintptr_t>&claimed){
 void Visit(const api::VisualState001*state,void*){
     if(!state)return;
     auto*player=RE::PlayerCharacter::GetSingleton();if(!player||state->actorFormID!=player->GetFormID())return;
-    if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001))return;
+    if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001)){RestoreUnclaimed(player,{});RestoreVisibility({});return;}
     auto visuals=Visuals(*state);auto parts=racemenu::ScanPlayerBipedParts();auto live=MatchLive(visuals,parts);
-    Json report={{"schema",1},{"generatorVersion","0.19.0"},{"session",height_profiles::Session()},
+    Json report={{"schema",1},{"generatorVersion","0.19.1"},{"session",height_profiles::Session()},
         {"configurationRevision",configRevision},{"heelMax",HeelMax()},{"NoHeelMaximum",1.0},
         {"active",Bool("applyMorph",false)},{"visuals",Json::array()},{"decisions",Json::array()}};
     const auto libraryIO=bulk_height::Counters();
@@ -376,10 +422,9 @@ void Visit(const api::VisualState001*state,void*){
         for(const auto& l:live)if(l.visual.armor==v.armor&&l.visual.addon==v.addon&&l.visual.model==v.model){row["liveMatched"]=true;row["bodyTri"]=l.tri;}
         report["visuals"].push_back(std::move(row));
     }
-    std::set<std::uintptr_t> claimed;
-    auto finish=[&]{RestoreUnclaimed(player,claimed);if(Bool("writeRuntimeState",true))runtime_files::Status(std::move(report));};
+    std::set<std::uintptr_t> claimed,claimedHidden;
+    auto finish=[&]{RestoreUnclaimed(player,claimed);RestoreVisibility(claimedHidden);if(Bool("writeRuntimeState",true))runtime_files::Status(std::move(report));};
     if(!Bool("applyMorph",false)){
-        for(const auto&v:live)if(v.visual.stocking)SetPreparedFootOcclusion(v,false);
         barefootSettler.Reset();report["state"]="controller-disabled";finish();return;
     }
     std::vector<const Live*> shoes,stockings;std::set<std::uintptr_t> seenShoes,seenStockings;
@@ -392,14 +437,11 @@ void Visit(const api::VisualState001*state,void*){
     const auto barefoot=ObserveBarefoot(player,*state,visuals,parts,shoes.size(),context);
     report["barefootEvidence"]=barefoot.evidence;
     report["state"]=shoes.size()==1?"one-live-footwear":barefoot.decision;
-    const auto coverage=shoes.size()==1?CoverageMark(shoes.front()->visual.armorID):std::string{"preserve"};
-    const bool hidePrepared=stocking_occlusion::ShouldHide(Bool("enableStockingFootOcclusion",true),shoes.size(),coverage);
-    report["stockingFootOcclusion"]={{"enabled",Bool("enableStockingFootOcclusion",true)},
-        {"coverage",coverage},{"hidePreparedFoot",hidePrepared},{"preparedShape","VHA_CPB_CoveredFoot"}};
-    Json occ=Json::array();
-    for(const auto*stock:stockings){const auto o=SetPreparedFootOcclusion(*stock,hidePrepared);
-        occ.push_back({{"stocking",stock->visual.armorID},{"prepared",o.prepared},{"hidden",o.hidden},{"changed",o.changed}});}
-    report["stockingFootOcclusion"]["stockings"]=std::move(occ);
+    const auto prepared=prepared_cpb::Current();
+    report["preparedCpb"]={{"status",prepared->status},{"error",prepared->error},{"generation",prepared->generation},
+        {"agataSourcesValid",prepared->agataReady},{"agataSourceError",prepared->agataError},
+        {"glassSourcesValid",prepared->glassReady},{"glassSourceError",prepared->glassError},
+        {"gameVisualValidation",false}};
     if(shoes.size()==1||barefoot.ready)for(const auto*stock:stockings){
         const auto cap=height_profiles::RequestCapability(stock->tri);
         const std::string shoeID=shoes.size()==1?shoes.front()->visual.armorID:"<barefoot>";
@@ -421,18 +463,34 @@ void Visit(const api::VisualState001*state,void*){
         if(!Capable(*stock,*cap,plan->values)){
             item["reason"]="required-morph-or-live-shape-unavailable";report["decisions"].push_back(item);continue;
         }
+        const bool preparedTarget=prepared_cpb::ResourceMatches(stock->visual.model,stock->tri)&&prepared->ready;
+        const Live* shoe=shoes.size()==1?shoes.front():nullptr;
+        const bool glass=preparedTarget&&shoe&&prepared_cpb::IsGlass(shoeID,shoeAddon,shoe->visual.model);
+        const bool agata=preparedTarget&&shoe&&prepared_cpb::IsAgata(shoeID,shoeAddon,shoe->visual.model);
+        const bool fit=glass&&prepared->glassReady&&prepared_cpb::AtHeight(plan->values.noHeel,plan->values.heel,1.1)&&PreparedContext(context,prepared->glassBlockedMorphs);
+        const bool hide=agata&&prepared->agataReady&&Bool("enableStockingFootOcclusion",true)&&!PreserveOverride(shoeID)&&
+            prepared_cpb::AtHeight(plan->values.noHeel,plan->values.heel,.47)&&PreparedContext(context,prepared->agataBlockedMorphs);
+        item["preparedCpb"]={{"target",preparedTarget},{"glassFitEligible",fit},{"agataOcclusionEligible",hide},
+            {"footHidden",false},{"fitSubmitted",false},{"eligibilityScope","exact-shoe-source-weight-height-and-foot-morphs"}};
         const auto id=reinterpret_cast<std::uintptr_t>(stock->root.get());
         const auto signature=Json::array({shoeID,shoeAddon,stock->visual.armorID,stock->visual.addonID,
-            plan->values.noHeel,plan->values.heel,context,cap->fingerprint,barefoot.ready?barefoot.signature:std::string{},plan->authority,configRevision}).dump();
+            plan->values.noHeel,plan->values.heel,context,cap->fingerprint,barefoot.ready?barefoot.signature:std::string{},plan->authority,configRevision,
+            fit,hide,preparedTarget?prepared->generation:std::string{}}).dump();
         const auto stamp=Stamp(stock->root.get());const auto revision=dirty.load();auto old=applications.find(id);
-        if(old!=applications.end()&&old->second.desired==signature&&old->second.stamp==stamp&&old->second.dirty==revision){
-            claimed.insert(id);item["submitted"]=true;item["reason"]="managed-current";report["decisions"].push_back(item);continue;}
-        const std::array<scoped_morph_transaction::Target,2> targets{{{"NoHeel",float(plan->values.noHeel)},{"Heel",float(plan->values.heel)}}};
-        const bool ok=racemenu::ApplyScopedMorphs(player,stock->root.get(),targets,stock->visual.armorID);
-        logger::info("[height apply] stocking='{}' shoe='{}' NoHeel={:.4f} Heel={:.4f} source={} submitted={}",
-            stock->visual.armorID,shoeID,plan->values.noHeel,plan->values.heel,plan->authority,ok);
+        const bool current=old!=applications.end()&&old->second.desired==signature&&old->second.stamp==stamp&&old->second.dirty==revision;
+        std::vector<scoped_morph_transaction::Target> targets{{"NoHeel",float(plan->values.noHeel)},{"Heel",float(plan->values.heel)}};
+        if(fit)targets.push_back({std::string(prepared_cpb::FitMorph),1.0F});
+        // Other contexts rebuild from the actor baseline without our fit key.
+        const bool ok=current||racemenu::ApplyScopedMorphs(player,stock->root.get(),targets,stock->visual.armorID);
+        if(!current)logger::info("[height apply] stocking='{}' shoe='{}' NoHeel={:.4f} Heel={:.4f} source={} submitted={} glassFit={}",
+            stock->visual.armorID,shoeID,plan->values.noHeel,plan->values.heel,plan->authority,ok,fit);
+        if(ok){
+            if(!current)applications[id]={stock->root,signature,Stamp(stock->root.get()),revision};
+            claimed.insert(id);lastDecision.erase(stock->visual.armorID+"|"+shoeID);
+            if(hide)item["preparedCpb"]["footHidden"]=HidePreparedFoot(*stock,claimedHidden);
+            item["preparedCpb"]["fitSubmitted"]=fit;
+        }
         item["submitted"]=ok;item["reason"]=ok?"managed-current":"morph-submission-failed";report["decisions"].push_back(item);
-        if(ok){applications[id]={stock->root,signature,Stamp(stock->root.get()),revision};claimed.insert(id);lastDecision.erase(stock->visual.armorID+"|"+shoeID);}
     }
     finish();
 }
@@ -462,7 +520,7 @@ void PollReloadMailbox(){
         const auto id=runtime_files::RequestReload();
         ConsoleMessage(std::format("VHA reload {} queued. Close the console to resume game tasks.",id));
     }else if(value==2.0F){
-        ConsoleMessage(std::format("VHA 0.19.0 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
+        ConsoleMessage(std::format("VHA 0.19.1 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
     }else ConsoleMessage("VHA: set VHA_Reload to 1 = reread + reapply; to 2 = status. Other values ignored.");
 }
 void QueueSnapshot(){
@@ -490,9 +548,10 @@ void QueueSnapshot(){
                 dirty.fetch_add(1);--forcedPasses;
                 nextForcedPass=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
             }
-            if(!Connect()||!racemenu::Available())return;auto*player=RE::PlayerCharacter::GetSingleton();
-            if(player)svs->VisitActorVisualState(player,Visit,nullptr);
-        }catch(const std::exception&e){logger::warn("[height runtime] safe evaluation failure: {}",e.what());}
+            auto* player=RE::PlayerCharacter::GetSingleton();
+            if(!Connect()||!racemenu::Available()){RestoreVisibility({});if(player)RestoreUnclaimed(player,{});return;}
+            if(player&&!svs->VisitActorVisualState(player,Visit,nullptr)){RestoreVisibility({});RestoreUnclaimed(player,{});}
+        }catch(const std::exception&e){RestoreVisibility({});if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});logger::warn("[height runtime] safe evaluation failure: {}",e.what());}
     });
 }
 // Slow condition/watchdog refresh, not per-frame polling. Also covers OBody
@@ -515,9 +574,10 @@ public:RE::BSEventNotifyControl ProcessEvent(const RE::TESEquipEvent*e,RE::BSTEv
 void AcceptConfiguration(Json next){
     // Caller owns updateMutex in an SKSE task. Workers never touch game objects.
     if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});
+    RestoreVisibility({});
     foot_capture::SetSessionReady(false);
     config=std::move(next);config_state::Set(config);++configRevision;
-    height_profiles::BeginSession();bulk_height::Reset();applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();
+    height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();
     foot_capture::SetSessionReady(true);dirty.fetch_add(1);foot_capture::RequestCapture();
     logger::info("[config reload] accepted revision={} Heel=[0,{}] NoHeel=[0,1] cached context invalidated",configRevision,HeelMax());
 }
@@ -529,12 +589,13 @@ void Load(){
     else if(config.empty()){config={{"applyMorph",false},{"automaticHeight",false},{"heelMax",2.0}};}
     config_state::Set(config);++configRevision;
     runtime_files::Acknowledge(config,configRevision);
-    height_profiles::BeginSession();bulk_height::Reset();
+    height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();
     if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});
+    RestoreVisibility({});
     applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();racemenu::ResetAttachmentCache();
     racemenu::Initialize();racemenu::SetAttachmentChangedCallback(Changed);
     if(!registered){auto*h=RE::ScriptEventSourceHolder::GetSingleton();auto*s=h?h->GetEventSource<RE::TESEquipEvent>():nullptr;if(s){s->AddEventSink(&equip);registered=true;}}
-    height_profiles::Initialize(QueueSnapshot);bulk_height::Initialize(QueueSnapshot);runtime_files::Initialize(QueueSnapshot);
+    height_profiles::Initialize(QueueSnapshot);bulk_height::Initialize(QueueSnapshot);prepared_cpb::Initialize(QueueSnapshot);runtime_files::Initialize(QueueSnapshot);
     running.store(true);foot_capture::SetSessionReady(true);StartTimer();
     logger::info("[height runtime] active={} automatic={} HeelRange=[0,{}] NoHeelRange=[0,1] endpointApproximation={} barefootFlatFeet={} (BodySlide full scan retired; clearance paused)",
         Bool("applyMorph",false),Bool("automaticHeight",true),HeelMax(),Bool("allowHeightEndpointApproximation",false),Bool("barefootFlatFeet",true));
@@ -545,11 +606,11 @@ void Handle(SKSE::MessagingInterface::Message*message){
     switch(message->type){
     case SKSE::MessagingInterface::kPostPostLoad:racemenu::Initialize();break;
     case SKSE::MessagingInterface::kPreLoadGame:
-        running.store(false);foot_capture::SetSessionReady(false);height_profiles::BeginSession();bulk_height::Reset();break;
+        running.store(false);foot_capture::SetSessionReady(false);height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();break;
     case SKSE::MessagingInterface::kDataLoaded:
     case SKSE::MessagingInterface::kPostLoadGame:
     case SKSE::MessagingInterface::kNewGame:
-        running.store(false);foot_capture::SetSessionReady(false);height_profiles::BeginSession();bulk_height::Reset();
+        running.store(false);foot_capture::SetSessionReady(false);height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();
         if(auto*t=SKSE::GetTaskInterface())t->AddTask(Load);break;
     default:break;
     }

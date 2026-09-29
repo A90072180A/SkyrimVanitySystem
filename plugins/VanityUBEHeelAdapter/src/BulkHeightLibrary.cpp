@@ -110,7 +110,11 @@ struct Library::Impl {
     std::map<std::string,bool> sources;
     Impl(std::filesystem::path r,std::filesystem::path m,std::function<void()> cb):root(std::move(r)),meshes(std::move(m)),callback(std::move(cb)),worker([this](std::stop_token stop){Run(stop);}){}
     ~Impl(){worker.request_stop();cv.notify_all();worker.join();}
-    std::string Token(const Request&q){return Key(q.shoe)+'\n'+Key(q.stocking)+'\n'+q.context+'\n'+std::to_string(std::bit_cast<std::uint64_t>(q.weight))+'\n'+std::to_string(std::bit_cast<std::uint64_t>(q.heelMax))+(q.allowResidualWarnings?"/warn":"/strict");}
+    std::string Token(const Request&q){
+        auto token=Key(q.shoe)+'\n'+Key(q.stocking)+'\n'+q.context+'\n'+std::to_string(std::bit_cast<std::uint64_t>(q.weight))+'\n'+std::to_string(std::bit_cast<std::uint64_t>(q.heelMax))+(q.allowResidualWarnings?"/warn":"/strict");
+        for(const auto& a:q.sourceAliases)token+='\n'+a.before.resource+':'+std::to_string(a.before.fingerprint)+">"+a.after.resource+':'+std::to_string(a.after.fingerprint);
+        return token;
+    }
     void Load(std::uint64_t current){
         if(diskEpoch==current)return;
         diskEpoch=current;index={};entries.clear();shards.clear();sources.clear();indexError.clear();
@@ -134,7 +138,9 @@ struct Library::Impl {
         if(std::abs(q.weight-shard.weight)>.001){out.state="source-weight-mismatch";return out;}
         if((member->flags&1)&&!q.allowResidualWarnings){out.state="residual-warning-disabled";return out;}
         const auto values=shard.groups[member->group];Require(Valid(values,q.heelMax),"library-controls-exceed-current-limits");
-        for(auto i:member->sources){const auto&a=shard.assets[i];const auto token=a.resource+'\n'+std::to_string(a.fingerprint);auto found=sources.find(token);bool valid=false;
+        for(auto i:member->sources){const auto& original=shard.assets[i];Asset a=original;
+            for(const auto& alias:q.sourceAliases)if(alias.before.resource==original.resource&&alias.before.fingerprint==original.fingerprint){a=alias.after;++out.migratedSources;break;}
+            const auto token=a.resource+'\n'+std::to_string(a.fingerprint);auto found=sources.find(token);bool valid=false;
             if(found!=sources.end())valid=found->second;
             else{try{++assetReads;valid=HashFile(meshes/Path(a.resource))==a.fingerprint;}catch(...){valid=false;}if(sources.size()>=4096)sources.clear();sources[token]=valid;}
             if(!valid){out.state="stale-or-unreadable-source";out.detail=a.resource;return out;}
@@ -157,6 +163,12 @@ Library::~Library()=default;
 Reply Library::Lookup(Request q){
     try{
         q.shoe=Canon(std::move(q.shoe));q.stocking=Canon(std::move(q.stocking));Require(std::isfinite(q.weight)&&q.weight>=0&&q.weight<=100&&std::isfinite(q.heelMax)&&q.heelMax>=1&&q.heelMax<=10&&q.context.size()<=65536,"invalid-library-request");
+        Require(q.sourceAliases.size()<=3,"too-many-source-aliases");std::set<std::string> aliases;
+        for(auto& a:q.sourceAliases){
+            a.before.resource=Resource(a.before.resource);a.after.resource=Resource(a.after.resource);
+            Require((a.before.resource.ends_with(".nif")&&a.after.resource.ends_with(".nif"))||(a.before.resource.ends_with(".tri")&&a.after.resource.ends_with(".tri")),"invalid-source-alias-type");
+            Require(a.before.fingerprint&&a.after.fingerprint&&aliases.insert(a.before.resource).second,"invalid-source-alias");
+        }
         std::scoped_lock lock(impl->mutex);auto key=impl->Token(q);auto it=impl->replies.find(key);if(it!=impl->replies.end())return it->second;
         if(impl->jobs.size()<32&&impl->pending.insert(key).second){impl->jobs.emplace_back(impl->epoch,std::move(q));impl->cv.notify_one();}return {};
     }catch(const std::exception&e){Reply r;r.state="invalid-request";r.detail=e.what();return r;}
