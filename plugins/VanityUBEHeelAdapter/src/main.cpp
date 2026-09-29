@@ -8,6 +8,7 @@
 #include "BulkHeightLibrary.h"
 #include "BarefootPolicy.h"
 #include "FootCapturePolicy.h"
+#include "StockingOcclusionPolicy.h"
 #include "api/SkyrimVanitySystemAPI.h"
 #include <nlohmann/json.hpp>
 #include <condition_variable>
@@ -79,6 +80,11 @@ std::string Mark(const std::string& id){
         auto found=kinds->find(id);if(found!=kinds->end()&&found->is_string())return found->get<std::string>();
     }return {};
 }
+std::string CoverageMark(const std::string& id){
+    auto kinds=config.find("manualFootwearCoverage");if(kinds!=config.end()&&kinds->is_object()){
+        auto found=kinds->find(id);if(found!=kinds->end()&&found->is_string())return found->get<std::string>();
+    }return "preserve";
+}
 bool IsStocking(const Visual&v){
     const auto mark=Mark(v.armorID);if(!mark.empty())return mark=="stocking";
     if(ExplicitStocking(v.armorID))return true;
@@ -107,31 +113,33 @@ std::vector<Visual> Visuals(const api::VisualState001& state){
 }
 std::vector<Live> MatchLive(const std::vector<Visual>& visuals,const std::vector<racemenu::BipedPartRecord>&parts){
     std::vector<Live> out;
-    for(const auto&v:visuals){if(v.ignored)continue;std::map<std::uintptr_t,Live> matches;
+    for(const auto&v:visuals){
+        if(v.ignored)continue;
         const auto stem=Stem(v.model);if(stem.empty())continue;
-        for(const auto&p:parts){if(p.buffered||!p.partClone)continue;
-            // Actual BODYTRI stem is required even if a stale/synthetic ARMA ID
-            // happens to match. Buffered parts and attachment-cache-only nodes
-            // are never authority. Parent slots may differ from the visual slot.
+        std::map<std::uintptr_t,Live> candidates;
+        for(const auto&p:parts){
+            if(p.buffered||!p.partClone)continue;
+            std::vector<std::pair<RE::NiAVObject*,std::string>> matches;
             RE::BSVisit::TraverseScenegraphObjects(p.partClone.get(),[&](RE::NiAVObject*n){
                 auto* extra=n->GetExtraData<RE::NiStringExtraData>("BODYTRI");
-                if(extra&&extra->value&&Stem(extra->value)==stem){
-                    const auto id=reinterpret_cast<std::uintptr_t>(n);
-                    matches.try_emplace(id,Live{v,RE::NiPointer<RE::NiAVObject>(n),extra->value});
-                }return RE::BSVisit::BSVisitControl::kContinue;
+                if(extra&&extra->value&&Stem(extra->value)==stem)matches.emplace_back(n,extra->value);
+                return RE::BSVisit::BSVisitControl::kContinue;
             });
+            if(matches.empty())continue;
+            std::vector<std::pair<RE::NiAVObject*,std::string>> outer;
+            for(const auto&match:matches){
+                bool nested=false;
+                for(auto* parent=match.first->parent;parent&&!nested;parent=parent->parent)
+                    for(const auto&other:matches)if(other.first==parent){nested=true;break;}
+                if(!nested)outer.push_back(match);
+            }
+            if(outer.empty())continue;
+            RE::NiAVObject* root=outer.size()==1?outer.front().first:p.partClone.get();
+            candidates.try_emplace(reinterpret_cast<std::uintptr_t>(root),
+                Live{v,RE::NiPointer<RE::NiAVObject>(root),outer.front().second});
         }
-        // Duplicate BODYTRI on a root and its descendant is one attachment,
-        // not two competing outfits. Keep the outermost scoped marker.
-        std::vector<std::uintptr_t> nested;
-        for(const auto&[id,value]:matches) {
-            auto* node=value.root->parent;
-            for(unsigned depth=0;node&&depth<64;++depth,node=node->parent)
-                if(matches.contains(reinterpret_cast<std::uintptr_t>(node))){nested.push_back(id);break;}
-        }
-        for(auto id:nested)matches.erase(id);
-        if(matches.size()==1)out.push_back(std::move(matches.begin()->second));
-        else if(matches.size()>1)logger::warn("[height target] ambiguous live BODYTRI objects for {}",v.armorID);
+        if(candidates.size()==1)out.push_back(std::move(candidates.begin()->second));
+        else if(candidates.size()>1)logger::warn("[height target] ambiguous live BODYTRI attachments for {}",v.armorID);
     }
     return out;
 }
@@ -161,6 +169,19 @@ bool Capable(const Live&target,const height_profiles::Capability&cap,hp::Control
         }return RE::BSVisit::BSVisitControl::kContinue;
     });
     return (n||h)&&(values.noHeel==0||n)&&(values.heel==0||h);
+}
+struct OcclusionResult {bool prepared{},hidden{},changed{};};
+OcclusionResult SetPreparedFootOcclusion(const Live& stock,const bool hide){
+    OcclusionResult out;
+    RE::BSVisit::TraverseScenegraphGeometries(stock.root.get(),[&](RE::BSGeometry*g){
+        if(!g||std::string_view(g->name.c_str()?g->name.c_str():"")!="VHA_CPB_CoveredFoot")
+            return RE::BSVisit::BSVisitControl::kContinue;
+        out.prepared=true;const bool before=g->GetAppCulled();
+        if(before!=hide){g->SetAppCulled(hide);out.changed=true;}
+        out.hidden=hide;return RE::BSVisit::BSVisitControl::kContinue;
+    });
+    if(out.changed)logger::info("[stocking occlusion] stocking='{}' prepared=true hidden={}",stock.visual.armorID,hide);
+    return out;
 }
 struct Plan {hp::Controls values;std::string authority;Json metadata=Json::object();};
 std::optional<Plan> UserPair(const Live& stock,const std::string& shoe,const std::string& shoeAddon,const std::string& context,const height_profiles::Capability& cap){
@@ -343,20 +364,24 @@ void Visit(const api::VisualState001*state,void*){
     auto*player=RE::PlayerCharacter::GetSingleton();if(!player||state->actorFormID!=player->GetFormID())return;
     if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001))return;
     auto visuals=Visuals(*state);auto parts=racemenu::ScanPlayerBipedParts();auto live=MatchLive(visuals,parts);
-    Json report={{"schema",1},{"generatorVersion","0.18.0"},{"session",height_profiles::Session()},
+    Json report={{"schema",1},{"generatorVersion","0.19.0"},{"session",height_profiles::Session()},
         {"configurationRevision",configRevision},{"heelMax",HeelMax()},{"NoHeelMaximum",1.0},
         {"active",Bool("applyMorph",false)},{"visuals",Json::array()},{"decisions",Json::array()}};
     const auto libraryIO=bulk_height::Counters();
     report["offlineLibraryIO"]={{"indexReads",libraryIO.indexReads},{"shoeReads",libraryIO.shardReads},{"assetReads",libraryIO.assetReads}};
     for(const auto&v:visuals){
         Json row={{"armor",v.armorID},{"addon",v.addonID},{"model",v.model},{"visualSlots",v.slots},
-            {"kind",v.ignored?"ignore":v.stocking?"stocking":"footwear"},{"manualMark",Mark(v.armorID)},{"liveMatched",false}};
+            {"kind",v.ignored?"ignore":v.stocking?"stocking":"footwear"},{"manualMark",Mark(v.armorID)},
+            {"coverage",v.stocking?std::string{}:CoverageMark(v.armorID)},{"liveMatched",false}};
         for(const auto& l:live)if(l.visual.armor==v.armor&&l.visual.addon==v.addon&&l.visual.model==v.model){row["liveMatched"]=true;row["bodyTri"]=l.tri;}
         report["visuals"].push_back(std::move(row));
     }
     std::set<std::uintptr_t> claimed;
     auto finish=[&]{RestoreUnclaimed(player,claimed);if(Bool("writeRuntimeState",true))runtime_files::Status(std::move(report));};
-    if(!Bool("applyMorph",false)){barefootSettler.Reset();report["state"]="controller-disabled";finish();return;}
+    if(!Bool("applyMorph",false)){
+        for(const auto&v:live)if(v.visual.stocking)SetPreparedFootOcclusion(v,false);
+        barefootSettler.Reset();report["state"]="controller-disabled";finish();return;
+    }
     std::vector<const Live*> shoes,stockings;std::set<std::uintptr_t> seenShoes,seenStockings;
     for(const auto&v:live){auto id=reinterpret_cast<std::uintptr_t>(v.root.get());
         if(v.visual.stocking){if(seenStockings.insert(id).second)stockings.push_back(&v);}
@@ -367,6 +392,14 @@ void Visit(const api::VisualState001*state,void*){
     const auto barefoot=ObserveBarefoot(player,*state,visuals,parts,shoes.size(),context);
     report["barefootEvidence"]=barefoot.evidence;
     report["state"]=shoes.size()==1?"one-live-footwear":barefoot.decision;
+    const auto coverage=shoes.size()==1?CoverageMark(shoes.front()->visual.armorID):std::string{"preserve"};
+    const bool hidePrepared=stocking_occlusion::ShouldHide(Bool("enableStockingFootOcclusion",true),shoes.size(),coverage);
+    report["stockingFootOcclusion"]={{"enabled",Bool("enableStockingFootOcclusion",true)},
+        {"coverage",coverage},{"hidePreparedFoot",hidePrepared},{"preparedShape","VHA_CPB_CoveredFoot"}};
+    Json occ=Json::array();
+    for(const auto*stock:stockings){const auto o=SetPreparedFootOcclusion(*stock,hidePrepared);
+        occ.push_back({{"stocking",stock->visual.armorID},{"prepared",o.prepared},{"hidden",o.hidden},{"changed",o.changed}});}
+    report["stockingFootOcclusion"]["stockings"]=std::move(occ);
     if(shoes.size()==1||barefoot.ready)for(const auto*stock:stockings){
         const auto cap=height_profiles::RequestCapability(stock->tri);
         const std::string shoeID=shoes.size()==1?shoes.front()->visual.armorID:"<barefoot>";
@@ -429,7 +462,7 @@ void PollReloadMailbox(){
         const auto id=runtime_files::RequestReload();
         ConsoleMessage(std::format("VHA reload {} queued. Close the console to resume game tasks.",id));
     }else if(value==2.0F){
-        ConsoleMessage(std::format("VHA 0.18.0 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
+        ConsoleMessage(std::format("VHA 0.19.0 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
     }else ConsoleMessage("VHA: set VHA_Reload to 1 = reread + reapply; to 2 = status. Other values ignored.");
 }
 void QueueSnapshot(){

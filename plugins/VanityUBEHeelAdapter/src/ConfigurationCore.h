@@ -20,7 +20,7 @@ inline void Fields(const Json& j,const std::set<std::string>& allowed,const std:
 inline void Validate(const Json& c){
     Require(c.is_object(),"configuration must be an object");
     Require(height_plan_core::ValidHeelLimit(HeelMax(c)),"heelMax must be finite in [1,10]");
-    for(const auto* name:{"applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","measureSurfaceCalibration","writeRuntimeState","exportStockingCalibration","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings"})
+    for(const auto* name:{"applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","measureSurfaceCalibration","writeRuntimeState","exportStockingCalibration","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings","enableStockingFootOcclusion"})
         if(c.contains(name))Require(c.at(name).is_boolean(),std::string(name)+" must be boolean");
     for(const auto* name:{"heightMaxNormalizedResidual"})if(c.contains(name)){
         Require(c.at(name).is_number(),std::string(name)+" must be numeric");auto v=c.at(name).get<double>();
@@ -61,6 +61,11 @@ inline void Validate(const Json& c){
         Require(c.at("manualItemKinds").is_object()&&c.at("manualItemKinds").size()<=2048,"manualItemKinds must be an object");
         for(auto i=c.at("manualItemKinds").begin();i!=c.at("manualItemKinds").end();++i){
             Require(ID(i.key())&&i->is_string(),"invalid item classification");auto v=i->get<std::string>();Require(v=="stocking"||v=="footwear"||v=="ignore","invalid item kind");}}
+    if(c.contains("manualFootwearCoverage")){
+        Require(c.at("manualFootwearCoverage").is_object()&&c.at("manualFootwearCoverage").size()<=2048,"manualFootwearCoverage must be an object");
+        for(auto i=c.at("manualFootwearCoverage").begin();i!=c.at("manualFootwearCoverage").end();++i){
+            Require(ID(i.key())&&i->is_string(),"invalid footwear coverage ID/value");auto v=i->get<std::string>();
+            Require(v=="preserve"||v=="opaque-closed","coverage must be preserve or opaque-closed");}}
 }
 inline Json Merge(const Json& base,const Json& user){
     Require(base.is_object(),"base configuration must be an object");Json result=base;
@@ -70,21 +75,23 @@ inline Json Merge(const Json& base,const Json& user){
     Fields(user,{"schema","settings","items","pairs"},"user file");
     if(user.contains("schema"))Require(user.at("schema")==1,"unsupported user schema");
     if(user.contains("settings")){
-        Fields(user.at("settings"),{"heelMax","heightMaxNormalizedResidual","applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","exportStockingCalibration","writeRuntimeState","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings"},"user settings");
+        Fields(user.at("settings"),{"heelMax","heightMaxNormalizedResidual","applyMorph","automaticHeight","autoDetectStockings","barefootFlatFeet","allowHeightEndpointApproximation","exportFootGeometry","exportStockingCalibration","writeRuntimeState","enableComponentSubset","useOfflineHeightLibrary","applyHeightResidualWarnings","enableStockingFootOcclusion"},"user settings");
         for(auto i=user.at("settings").begin();i!=user.at("settings").end();++i)result[i.key()]=i.value();
     }
     if(user.contains("items")){
-        const auto&items=user.at("items");Require(items.is_array()&&items.size()<=2048,"items must be an array");Json kinds=Json::object(),notes=Json::object();
-        for(const auto&row:items){Fields(row,{"armor","kind","note","addons"},"item");auto id=row.value("armor",std::string{}),kind=row.value("kind",std::string{});
+        const auto&items=user.at("items");Require(items.is_array()&&items.size()<=2048,"items must be an array");Json kinds=Json::object(),notes=Json::object(),coverage=Json::object();
+        for(const auto&row:items){Fields(row,{"armor","kind","note","addons","coverage"},"item");auto id=row.value("armor",std::string{}),kind=row.value("kind",std::string{});
             Require(ID(id)&&!kinds.contains(id),"item ID invalid or duplicated");Require(kind=="stocking"||kind=="footwear"||kind=="ignore","kind must be stocking, footwear or ignore");kinds[id]=kind;
             if(row.contains("note")){Require(row.at("note").is_string(),"item note must be a string");notes[id]=row.at("note");}
+            if(row.contains("coverage")){Require(kind=="footwear"&&row.at("coverage").is_string(),"coverage is valid only for footwear");
+                const auto value=row.at("coverage").get<std::string>();Require(value=="preserve"||value=="opaque-closed","coverage must be preserve or opaque-closed");coverage[id]=value;}
             if(row.contains("addons")) {
                 const auto& list=row.at("addons");Require(list.is_array()&&list.size()<=32,"addons must be an array <=32");
                 for(const auto& a:list)Require(a.is_string()&&ID(a.get<std::string>()),"invalid addon ID");
                 if(kind=="stocking")result["calibrationDonorAddons"][id]=list;
             }
         }
-        result["manualItemKinds"]=kinds;result["manualItemNotes"]=notes;
+        result["manualItemKinds"]=kinds;result["manualItemNotes"]=notes;result["manualFootwearCoverage"]=coverage;
     }
     if(user.contains("pairs"))result["manualPairs"]=user.at("pairs");
     Validate(result);return result;
