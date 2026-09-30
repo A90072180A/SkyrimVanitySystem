@@ -148,7 +148,7 @@ class ScannerEntryTests(unittest.TestCase):
             root=vha_offline.gui(args,run_loop=False);app=root.vha;root.update()
             self.assertEqual(app['paths']['plugins'].get(),str(dest));self.assertIsNone(app['state']['scanner'])
             child=app['edit_manual_overlay']();self.assertIsNotNone(child)
-            self.assertEqual(child.vha['state']['session'].path,dest/'VanityUBEHeelAdapter.user.json')
+            self.assertEqual(child.vha['state']['session'].path,(dest/'VanityUBEHeelAdapter.user.json').resolve())
             child.vha['raw'].insert('end',' ')
             with mock.patch('tkinter.messagebox.askyesno',return_value=False):
                 app['close']();self.assertTrue(root.winfo_exists());self.assertTrue(child.winfo_exists())
