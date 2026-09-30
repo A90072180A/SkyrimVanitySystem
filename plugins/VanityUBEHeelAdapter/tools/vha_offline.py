@@ -27,10 +27,13 @@ def gui(args, *, run_loop=True):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     from offline.catalog_widget import CatalogPanel
-    root=tk.Tk();root.title('VHA 离线高度扫描 / '+VERSION+' / library1');root.geometry('1380x920');root.minsize(1120,820)
-    data=tk.StringVar(value=str(args.data or ''))
-    profile=tk.StringVar(value=str(args.profile or ''))
-    mods_root=tk.StringVar(value=str(getattr(args,'mods_root',None) or ''))
+    from tool_preferences import Preferences, PATH_KEYS, SCOPED_KEYS
+    preferences=Preferences(getattr(args,"settings_file",None))
+    remembered=preferences.initial(args)
+    root=tk.Tk();root.title('VHA 0.20.0 / 高度扫描、库浏览、手工覆盖');root.geometry('1380x920');root.minsize(1120,820)
+    pathvars={key:tk.StringVar(master=root,value=remembered[key]) for key in PATH_KEYS}
+    data,profile,mods_root=(pathvars[key] for key in ('data','profile','mods_root'))
+    for key in SCOPED_KEYS:setattr(args,key,Path(remembered[key]) if remembered[key] else None)
     weight=tk.StringVar(value=str(args.weight));anchor=tk.StringVar(value=args.anchor)
     msg=tk.StringVar(value='在 MO2 中启动本程序。先扫描当前启用插件，再选择丝袜、计算高度建议。')
     allow=tk.BooleanVar(value=True)
@@ -40,6 +43,51 @@ def gui(args, *, run_loop=True):
         ttk.Entry(top,textvariable=var).grid(row=row,column=1,sticky='ew',padx=8,pady=3)
         ttk.Button(top,text='选择目录',command=lambda v=var:v.set(filedialog.askdirectory() or v.get())).grid(row=row,column=2)
     top.columnconfigure(1,weight=1)
+    pathbar=ttk.Frame(root,padding=(10,0));pathbar.pack(fill='x')
+    path_notice=tk.StringVar(master=root,value=preferences.warning or '路径会自动记住；切换 profile 时分别恢复写入目录。')
+    advanced=ttk.LabelFrame(root,text='写入路径（留空＝使用 Data 默认位置／游戏回执）',padding=6)
+    for row,(key,label) in enumerate((('output','扫描报告目录'),('plugins','SKSE/Plugins 读写目录'),('user_file','手工覆盖 JSON'))):
+        ttk.Label(advanced,text=label).grid(row=row,column=0,sticky='w')
+        ttk.Entry(advanced,textvariable=pathvars[key]).grid(row=row,column=1,sticky='ew',padx=6,pady=2)
+        def choose_path(k=key):
+            current=pathvars[k].get()
+            if k=='user_file':
+                value=filedialog.asksaveasfilename(title='选择或新建手工覆盖文件（这里只选路径，不写文件）',
+                    initialdir=str(Path(current).parent) if current else None,
+                    initialfile='VanityUBEHeelAdapter.user.json',defaultextension='.json',filetypes=[('JSON','*.json')])
+            else:value=filedialog.askdirectory(initialdir=current or None)
+            if value:pathvars[k].set(value)
+        ttk.Button(advanced,text='选择路径',command=choose_path).grid(row=row,column=2)
+    advanced.columnconfigure(1,weight=1)
+    def toggle_paths():
+        if advanced.winfo_manager():advanced.pack_forget()
+        else:advanced.pack(fill='x',padx=10,before=options)
+    save_state={'timer':None,'restoring':False}
+    def remember_paths(explicit=False):
+        if save_state['timer']:
+            root.after_cancel(save_state['timer']);save_state['timer']=None
+        try:
+            preferences.save({k:v.get() for k,v in pathvars.items()},repair=explicit)
+            path_notice.set('路径已记住：'+str(preferences.path))
+            return True
+        except (OSError,ValueError) as exc:
+            path_notice.set('路径未保存：'+str(exc))
+            return False
+    def path_changed(key):
+        if save_state['restoring']:return
+        if key in ('profile','data'):
+            save_state['restoring']=True
+            stored=preferences.for_profile(profile.get()) if key=='profile' else {}
+            for k in SCOPED_KEYS:pathvars[k].set(stored.get(k,''))
+            save_state['restoring']=False
+        for k in SCOPED_KEYS:
+            value=pathvars[k].get().strip();setattr(args,k,Path(value) if value else None)
+        if save_state['timer']:root.after_cancel(save_state['timer'])
+        save_state['timer']=root.after(700,remember_paths)
+    for key,var in pathvars.items():var.trace_add('write',lambda *_,k=key:path_changed(k))
+    ttk.Button(pathbar,text='记住路径',command=lambda:remember_paths(True)).pack(side='left')
+    ttk.Button(pathbar,text='展开／收起写入路径',command=toggle_paths).pack(side='left',padx=6)
+    ttk.Label(pathbar,textvariable=path_notice,wraplength=950).pack(side='left')
     options=ttk.Frame(root,padding=(10,0));options.pack(fill='x')
     ttk.Label(options,text='源模型体重 0–100：').pack(side='left')
     ttk.Entry(options,textvariable=weight,width=6).pack(side='left')
@@ -230,7 +278,7 @@ def gui(args, *, run_loop=True):
                 messagebox.showinfo('请选择组','明确选择要保存的共享值组。',parent=window);return
             indexes=[i for j in ids for i in g['groups'][j]['memberIndexes']]
             if not messagebox.askyesno('共享值会改变成员的实际数值',
-                f'导出 {len(ids)} 组、{len(indexes)} 个明确成员到独立高度库？\n仅新 DLL 0.18.0 可读取。近似组会采用组代表值，并记录原值和警告；已有手工配对优先。',parent=window):return
+                f'导出 {len(ids)} 组、{len(indexes)} 个明确成员到独立高度库？\n需要 DLL 0.18.0 或更新版本。近似组会采用组代表值，并记录原值和警告；已有手工配对优先。',parent=window):return
             start_export(indexes,g,ids)
         ttk.Button(bottom,text='保存选中共享组到高度库',command=export_groups).pack(side='left')
         ttk.Label(bottom,text='不改 .user.json；原值保留，近似值需明确选择。').pack(side='left')
@@ -340,8 +388,23 @@ def gui(args, *, run_loop=True):
         options=argparse.Namespace(library=None, plugins=args.plugins or (d/'SKSE/Plugins' if d else None),
             user_file=args.user_file, data=d, shoe='')
         return library_gui(options,parent=root,rows=current_rows,selected=chosen,run_loop=False)
+    def edit_manual_overlay():
+        try:
+            from overlay_ui import gui as overlay_gui
+            d=Path(data.get().strip()) if data.get().strip() else None
+            plugins=args.plugins or (d/'SKSE/Plugins' if d else None)
+            if plugins is None:raise ValueError('先选择 Data 或展开写入路径设置 SKSE/Plugins；无需扫描。')
+            remember_paths()
+            seed={}
+            for key,panel in (('stocking',sock_panel),('footwear',shoe_panel)):
+                row=panel.active_row()
+                if row and len(panel.selected_keys())==1:seed[key]=row['armor']
+            return overlay_gui(plugins,args.user_file,parent=root,run_loop=False,seed=seed or None)
+        except (OSError,ValueError,RuntimeError) as exc:
+            messagebox.showerror('手工覆盖未打开',str(exc),parent=root)
+
     edit_actions=ttk.Frame(root,padding=(10,0));edit_actions.pack(fill='x')
-    for pos,(label,fn) in enumerate((('浏览已保存高度库',browse_saved_library),('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
+    for pos,(label,fn) in enumerate((('直接编辑手工覆盖 JSON',edit_manual_overlay),('浏览已保存高度库',browse_saved_library),('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
         b=ttk.Button(edit_actions,text=label,command=fn);b.grid(row=pos//4,column=pos%4,padx=3,pady=2,sticky='ew');buttons.append(b)
     for column in range(4):edit_actions.columnconfigure(column,weight=1)
     for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择可应用建议（含警告）',select_applicable),('3. 保存所选到高度库',export_selected)):
@@ -372,14 +435,23 @@ def gui(args, *, run_loop=True):
         except queue.Empty:pass
         root.after(100,poll)
     def close():
+        # Give manual editors a chance to cancel instead of discarding raw JSON.
+        for child in root.winfo_children():
+            app=getattr(child,'vha',{})
+            if 'baselineText' in app.get('state',{}):
+                app['close']()
+                if child.winfo_exists():return
+        remember_paths()
         cancel.set()
         for identifier in root.tk.call('after','info'):
-            root.after_cancel(identifier)
+            # Cancel Tcl timers without deleting commands owned by child widgets.
+            # Their own destroy() releases those commands exactly once.
+            root.tk.call('after','cancel',identifier)
         root.destroy()
     update_scope()
     root.protocol('WM_DELETE_WINDOW',close);root.after(100,poll)
     # Test seam uses the same widgets/actions as the shipped entry point.
-    root.vha={'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
+    root.vha={'paths':pathvars,'remember_paths':remember_paths,'preferences':preferences,'edit_manual_overlay':edit_manual_overlay,'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
               'browse_saved_library':browse_saved_library,'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
               'state':state,'retry_save':retry_save,'group_preview':group_preview,'candidates':candidates,'scope':scope_text,'message':msg,
               'compute_button':compute_button,'populate':populate,'close':close,
@@ -393,6 +465,7 @@ def main():
     p.add_argument('--plugins',type=Path,help='Actual SKSE/Plugins output parent; default virtual Data/SKSE/Plugins')
     p.add_argument('--mods-root',type=Path,help='MO2 mods directory for opened-handle provenance; never recursively scanned')
     p.add_argument('--output',type=Path);p.add_argument('--user-file',type=Path)
+    p.add_argument('--settings-file',type=Path,help='GUI path-memory file; CLI jobs never read saved paths')
     p.add_argument('--weight',type=float,default=0.);p.add_argument('--heel-max',type=float,default=2.)
     p.add_argument('--anchor',default=DEFAULT_ANCHOR);p.add_argument('--preset',type=Path);p.add_argument('--preset-name')
     p.add_argument('--race',help='Optional exact stable RACE ID; additional-race inheritance is not guessed')

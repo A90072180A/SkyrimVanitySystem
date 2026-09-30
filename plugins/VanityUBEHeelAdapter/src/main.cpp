@@ -8,7 +8,6 @@
 #include "BulkHeightLibrary.h"
 #include "BarefootPolicy.h"
 #include "FootCapturePolicy.h"
-#include "StockingOcclusionPolicy.h"
 #include "PreparedCpb.h"
 #include "api/SkyrimVanitySystemAPI.h"
 #include <nlohmann/json.hpp>
@@ -36,16 +35,6 @@ std::mutex updateMutex;
 bool loggedUnavailable=false,registered=false;
 struct Application {RE::NiPointer<RE::NiAVObject> object;std::string desired,stamp;std::uint64_t dirty{};};
 std::map<std::uintptr_t,Application> applications;
-struct HiddenFoot {RE::NiPointer<RE::NiAVObject> object;prepared_cpb::VisibilityLease lease;};
-std::map<std::uintptr_t,HiddenFoot> hiddenFeet;
-void RestoreVisibility(const std::set<std::uintptr_t>& claimed){
-    for(auto it=hiddenFeet.begin();it!=hiddenFeet.end();){
-        if(claimed.contains(it->first)){++it;continue;}
-        if(racemenu::IsLive(it->second.object.get()))
-            if(auto desired=it->second.lease.Release(it->second.object->GetAppCulled()))it->second.object->SetAppCulled(*desired);
-        it=hiddenFeet.erase(it);
-    }
-}
 barefoot_policy::Settler barefootSettler;
 std::map<std::string,std::string> lastDecision;
 void DecisionLog(const std::string& key,const std::string& message){
@@ -204,26 +193,12 @@ bool Capable(const Live&target,const height_profiles::Capability&cap,hp::Control
     });
     return (n||h)&&(values.noHeel==0||n)&&(values.heel==0||h);
 }
-bool HidePreparedFoot(const Live& stock,std::set<std::uintptr_t>& claimed){
-    bool hidden=false;
-    RE::BSVisit::TraverseScenegraphGeometries(stock.root.get(),[&](RE::BSGeometry* g){
-        if(!g||std::string_view(g->name.c_str()?g->name.c_str():"")!=prepared_cpb::FootShape)return RE::BSVisit::BSVisitControl::kContinue;
-        const auto id=reinterpret_cast<std::uintptr_t>(g);
-        auto it=hiddenFeet.try_emplace(id,HiddenFoot{RE::NiPointer<RE::NiAVObject>(g),{}}).first;
-        if(auto value=it->second.lease.Hide(g->GetAppCulled()))g->SetAppCulled(*value);
-        claimed.insert(id);hidden=g->GetAppCulled();return RE::BSVisit::BSVisitControl::kContinue;
-    });return hidden;
-}
 bool PreparedContext(const std::string& context,const std::vector<std::string>& blocked){
     try{const auto c=Json::parse(context);if(!c.is_array()||c.size()!=4||!c.at(3).is_array())return false;
         std::vector<prepared_cpb::MorphValue> values;
         for(const auto& m:c.at(3))values.push_back({m.at("name").get<std::string>(),m.at("value").get<double>()});
         return prepared_cpb::ContextSafe(c.at(2).get<double>(),c.at(1).get<unsigned>(),values,blocked);
     }catch(...){return false;}
-}
-bool PreserveOverride(const std::string& id){
-    const auto it=config.find("manualFootwearCoverage");if(it==config.end()||!it->is_object())return false;
-    const auto mark=it->find(id);return mark!=it->end()&&*mark=="preserve";
 }
 struct Plan {hp::Controls values;std::string authority;Json metadata=Json::object();};
 std::optional<Plan> UserPair(const Live& stock,const std::string& shoe,const std::string& shoeAddon,const std::string& context,const height_profiles::Capability& cap){
@@ -408,9 +383,9 @@ void RestoreUnclaimed(RE::Actor*player,const std::set<std::uintptr_t>&claimed){
 void Visit(const api::VisualState001*state,void*){
     if(!state)return;
     auto*player=RE::PlayerCharacter::GetSingleton();if(!player||state->actorFormID!=player->GetFormID())return;
-    if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001)){RestoreUnclaimed(player,{});RestoreVisibility({});return;}
+    if(state->interfaceRevision!=1||state->structureSize<sizeof(api::VisualState001)||state->pieceStructureSize!=sizeof(api::VisualPiece001)){RestoreUnclaimed(player,{});return;}
     auto visuals=Visuals(*state);auto parts=racemenu::ScanPlayerBipedParts();auto live=MatchLive(visuals,parts);
-    Json report={{"schema",1},{"generatorVersion","0.19.1"},{"session",height_profiles::Session()},
+    Json report={{"schema",1},{"generatorVersion","0.20.0"},{"session",height_profiles::Session()},
         {"configurationRevision",configRevision},{"heelMax",HeelMax()},{"NoHeelMaximum",1.0},
         {"active",Bool("applyMorph",false)},{"visuals",Json::array()},{"decisions",Json::array()}};
     const auto libraryIO=bulk_height::Counters();
@@ -422,8 +397,8 @@ void Visit(const api::VisualState001*state,void*){
         for(const auto& l:live)if(l.visual.armor==v.armor&&l.visual.addon==v.addon&&l.visual.model==v.model){row["liveMatched"]=true;row["bodyTri"]=l.tri;}
         report["visuals"].push_back(std::move(row));
     }
-    std::set<std::uintptr_t> claimed,claimedHidden;
-    auto finish=[&]{RestoreUnclaimed(player,claimed);RestoreVisibility(claimedHidden);if(Bool("writeRuntimeState",true))runtime_files::Status(std::move(report));};
+    std::set<std::uintptr_t> claimed;
+    auto finish=[&]{RestoreUnclaimed(player,claimed);if(Bool("writeRuntimeState",true))runtime_files::Status(std::move(report));};
     if(!Bool("applyMorph",false)){
         barefootSettler.Reset();report["state"]="controller-disabled";finish();return;
     }
@@ -441,7 +416,7 @@ void Visit(const api::VisualState001*state,void*){
     report["preparedCpb"]={{"status",prepared->status},{"error",prepared->error},{"generation",prepared->generation},
         {"agataSourcesValid",prepared->agataReady},{"agataSourceError",prepared->agataError},
         {"glassSourcesValid",prepared->glassReady},{"glassSourceError",prepared->glassError},
-        {"gameVisualValidation",false}};
+        {"stockingOcclusion","removed"},{"gameVisualValidation",false}};
     if(shoes.size()==1||barefoot.ready)for(const auto*stock:stockings){
         const auto cap=height_profiles::RequestCapability(stock->tri);
         const std::string shoeID=shoes.size()==1?shoes.front()->visual.armorID:"<barefoot>";
@@ -466,16 +441,13 @@ void Visit(const api::VisualState001*state,void*){
         const bool preparedTarget=prepared_cpb::ResourceMatches(stock->visual.model,stock->tri)&&prepared->ready;
         const Live* shoe=shoes.size()==1?shoes.front():nullptr;
         const bool glass=preparedTarget&&shoe&&prepared_cpb::IsGlass(shoeID,shoeAddon,shoe->visual.model);
-        const bool agata=preparedTarget&&shoe&&prepared_cpb::IsAgata(shoeID,shoeAddon,shoe->visual.model);
-        const bool fit=glass&&prepared->glassReady&&prepared_cpb::AtHeight(plan->values.noHeel,plan->values.heel,1.1)&&PreparedContext(context,prepared->glassBlockedMorphs);
-        const bool hide=agata&&prepared->agataReady&&Bool("enableStockingFootOcclusion",true)&&!PreserveOverride(shoeID)&&
-            prepared_cpb::AtHeight(plan->values.noHeel,plan->values.heel,.47)&&PreparedContext(context,prepared->agataBlockedMorphs);
-        item["preparedCpb"]={{"target",preparedTarget},{"glassFitEligible",fit},{"agataOcclusionEligible",hide},
+        const bool fit=glass&&Bool("enableGlassFootFit",true)&&prepared->glassReady&&prepared_cpb::AtHeight(plan->values.noHeel,plan->values.heel,1.1)&&PreparedContext(context,prepared->glassBlockedMorphs);
+        item["preparedCpb"]={{"target",preparedTarget},{"glassFitEligible",fit},{"agataOcclusionEligible",false},
             {"footHidden",false},{"fitSubmitted",false},{"eligibilityScope","exact-shoe-source-weight-height-and-foot-morphs"}};
         const auto id=reinterpret_cast<std::uintptr_t>(stock->root.get());
         const auto signature=Json::array({shoeID,shoeAddon,stock->visual.armorID,stock->visual.addonID,
             plan->values.noHeel,plan->values.heel,context,cap->fingerprint,barefoot.ready?barefoot.signature:std::string{},plan->authority,configRevision,
-            fit,hide,preparedTarget?prepared->generation:std::string{}}).dump();
+            fit,preparedTarget?prepared->generation:std::string{}}).dump();
         const auto stamp=Stamp(stock->root.get());const auto revision=dirty.load();auto old=applications.find(id);
         const bool current=old!=applications.end()&&old->second.desired==signature&&old->second.stamp==stamp&&old->second.dirty==revision;
         std::vector<scoped_morph_transaction::Target> targets{{"NoHeel",float(plan->values.noHeel)},{"Heel",float(plan->values.heel)}};
@@ -487,7 +459,6 @@ void Visit(const api::VisualState001*state,void*){
         if(ok){
             if(!current)applications[id]={stock->root,signature,Stamp(stock->root.get()),revision};
             claimed.insert(id);lastDecision.erase(stock->visual.armorID+"|"+shoeID);
-            if(hide)item["preparedCpb"]["footHidden"]=HidePreparedFoot(*stock,claimedHidden);
             item["preparedCpb"]["fitSubmitted"]=fit;
         }
         item["submitted"]=ok;item["reason"]=ok?"managed-current":"morph-submission-failed";report["decisions"].push_back(item);
@@ -520,7 +491,7 @@ void PollReloadMailbox(){
         const auto id=runtime_files::RequestReload();
         ConsoleMessage(std::format("VHA reload {} queued. Close the console to resume game tasks.",id));
     }else if(value==2.0F){
-        ConsoleMessage(std::format("VHA 0.19.1 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
+        ConsoleMessage(std::format("VHA 0.20.0 revision={} enabled={} HeelMax={}. See configuration-status.json and runtime-state.json.",configRevision,Bool("applyMorph",false),HeelMax()));
     }else ConsoleMessage("VHA: set VHA_Reload to 1 = reread + reapply; to 2 = status. Other values ignored.");
 }
 void QueueSnapshot(){
@@ -549,9 +520,9 @@ void QueueSnapshot(){
                 nextForcedPass=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
             }
             auto* player=RE::PlayerCharacter::GetSingleton();
-            if(!Connect()||!racemenu::Available()){RestoreVisibility({});if(player)RestoreUnclaimed(player,{});return;}
-            if(player&&!svs->VisitActorVisualState(player,Visit,nullptr)){RestoreVisibility({});RestoreUnclaimed(player,{});}
-        }catch(const std::exception&e){RestoreVisibility({});if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});logger::warn("[height runtime] safe evaluation failure: {}",e.what());}
+            if(!Connect()||!racemenu::Available()){if(player)RestoreUnclaimed(player,{});return;}
+            if(player&&!svs->VisitActorVisualState(player,Visit,nullptr)){RestoreUnclaimed(player,{});}
+        }catch(const std::exception&e){if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});logger::warn("[height runtime] safe evaluation failure: {}",e.what());}
     });
 }
 // Slow condition/watchdog refresh, not per-frame polling. Also covers OBody
@@ -574,7 +545,7 @@ public:RE::BSEventNotifyControl ProcessEvent(const RE::TESEquipEvent*e,RE::BSTEv
 void AcceptConfiguration(Json next){
     // Caller owns updateMutex in an SKSE task. Workers never touch game objects.
     if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});
-    RestoreVisibility({});
+    
     foot_capture::SetSessionReady(false);
     config=std::move(next);config_state::Set(config);++configRevision;
     height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();
@@ -591,7 +562,7 @@ void Load(){
     runtime_files::Acknowledge(config,configRevision);
     height_profiles::BeginSession();bulk_height::Reset();prepared_cpb::Reset();
     if(auto* player=RE::PlayerCharacter::GetSingleton())RestoreUnclaimed(player,{});
-    RestoreVisibility({});
+    
     applications.clear();measurementContext.clear();barefootSettler.Reset();lastDecision.clear();racemenu::ResetAttachmentCache();
     racemenu::Initialize();racemenu::SetAttachmentChangedCallback(Changed);
     if(!registered){auto*h=RE::ScriptEventSourceHolder::GetSingleton();auto*s=h?h->GetEventSource<RE::TESEquipEvent>():nullptr;if(s){s->AddEventSink(&equip);registered=true;}}

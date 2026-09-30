@@ -447,13 +447,15 @@ def validate_user(user,maximum=2.):
     import height_editor
     if not isinstance(user,dict) or set(user)-{'schema','settings','items','pairs'} or user.get('schema',1)!=1:
         raise ValueError('invalid user overlay schema/fields')
+    if 'schema' in user and (isinstance(user['schema'],bool) or not isinstance(user['schema'],(int,float))):raise ValueError('invalid schema type')
     settings=user.get('settings',{})
-    booleans={'applyMorph','automaticHeight','autoDetectStockings','barefootFlatFeet','allowHeightEndpointApproximation','exportFootGeometry','exportStockingCalibration','writeRuntimeState','enableComponentSubset','useOfflineHeightLibrary','applyHeightResidualWarnings'}
+    booleans={'applyMorph','automaticHeight','autoDetectStockings','barefootFlatFeet','allowHeightEndpointApproximation','exportFootGeometry','exportStockingCalibration','writeRuntimeState','enableComponentSubset','useOfflineHeightLibrary','applyHeightResidualWarnings','enableStockingFootOcclusion','enableGlassFootFit'}
     if not isinstance(settings,dict) or set(settings)-booleans-{'heelMax','heightMaxNormalizedResidual'}:raise ValueError('unknown user setting')
     for k,v in settings.items():
         if k in booleans and not isinstance(v,bool):raise ValueError('setting must be boolean: '+k)
         if k not in booleans and (isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v)):raise ValueError('setting must be finite: '+k)
     if 'heightMaxNormalizedResidual' in settings and not 0<=settings['heightMaxNormalizedResidual']<=1:raise ValueError('invalid residual threshold')
+    maximum=settings.get('heelMax',maximum)
     height_editor.controls(0,0,maximum)
     pairs=user.get('pairs',[]);items=user.get('items',[])
     if not isinstance(pairs,list) or not isinstance(items,list) or max(len(pairs),len(items))>2048:raise ValueError('overlay entry limit')
@@ -462,6 +464,7 @@ def validate_user(user,maximum=2.):
         if not isinstance(row,dict) or set(row)-{'stocking','footwear','mode','NoHeel','Heel','note','approval'}:raise ValueError('unknown pair field')
         a,b=row.get('stocking',''),row.get('footwear','')
         if not isinstance(a,str) or not isinstance(b,str) or not height_editor.ID.fullmatch(a) or (b!='<barefoot>' and not height_editor.ID.fullmatch(b)):raise ValueError('invalid pair IDs')
+        if len(a.encode('utf-8'))>300 or len(b.encode('utf-8'))>300:raise ValueError('pair ID exceeds native byte limit')
         pair=a.casefold(),b.casefold()
         if pair in seen:raise ValueError('duplicate pair')
         seen.add(pair);mode=row.get('mode','manual')
@@ -471,16 +474,19 @@ def validate_user(user,maximum=2.):
                 v=row.get(name)
                 if isinstance(v,bool) or not isinstance(v,(int,float)):raise ValueError('invalid control value')
             height_editor.controls(row['NoHeel'],row['Heel'],maximum)
-        if 'note' in row and (not isinstance(row['note'],str) or len(row['note'])>2000):raise ValueError('invalid pair note')
+        if 'note' in row and (not isinstance(row['note'],str) or len(row['note'].encode('utf-8'))>2000):raise ValueError('invalid pair note')
         if 'approval' in row:
             fields=set(height_editor.APPROVAL)|{'stockingAddon','footwearAddon'}
             if not isinstance(row['approval'],dict) or set(row['approval'])!=fields or not all(isinstance(v,str) and v for v in row['approval'].values()):raise ValueError('invalid existing approval')
     seen=set()
     for row in items:
-        if not isinstance(row,dict) or set(row)-{'armor','kind','note','addons'}:raise ValueError('invalid item fields')
+        if not isinstance(row,dict) or set(row)-{'armor','kind','note','addons','coverage'}:raise ValueError('invalid item fields')
         a=row.get('armor','')
         if not isinstance(a,str) or not height_editor.ID.fullmatch(a) or a.casefold() in seen:raise ValueError('invalid/duplicate item')
+        if len(a.encode('utf-8'))>300:raise ValueError('item ID exceeds native byte limit')
         seen.add(a.casefold())
         if row.get('kind') not in ('stocking','footwear','ignore'):raise ValueError('invalid item kind')
         if 'note' in row and not isinstance(row['note'],str):raise ValueError('invalid item note')
-        if 'addons' in row and (not isinstance(row['addons'],list) or len(row['addons'])>32 or not all(isinstance(a,str) and height_editor.ID.fullmatch(a) for a in row['addons'])):raise ValueError('invalid addon list')
+        if 'coverage' in row and (row.get('kind')!='footwear' or row['coverage'] not in ('opaque-closed','preserve')):raise ValueError('invalid legacy coverage')
+        if 'addons' in row and (not isinstance(row['addons'],list) or len(row['addons'])>32 or not all(isinstance(a,str) and height_editor.ID.fullmatch(a) and len(a.encode('utf-8'))<=300 for a in row['addons'])):raise ValueError('invalid addon list')
+    if len((json.dumps(user,indent=2,ensure_ascii=False,allow_nan=False)+'\n').encode('utf-8'))>1024*1024:raise ValueError('configuration larger than native 1 MiB limit')

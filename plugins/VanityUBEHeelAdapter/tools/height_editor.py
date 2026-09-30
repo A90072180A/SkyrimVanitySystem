@@ -19,9 +19,22 @@ from vha_fileio import optional_bytes, ensure_directory, unlink_missing_ok
 ID = re.compile(r"^.+\.(?:esp|esm|esl)\|[0-9a-f]{8}$", re.I)
 APPROVAL = ("context", "targetPositionFingerprint", "donorSourceFingerprint", "bodyTriFingerprint", "referenceConfiguration")
 
-def read_json(path: Path, default: Any = None) -> Any:
+def decode_json(payload: bytes) -> Any:
     def no_constant(text: str) -> None:
         raise ValueError(f"Non-finite JSON value: {text}")
+    def unique_keys(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+    if len(payload) > 16 * 1024 * 1024:
+        raise ValueError("File too large")
+    return json.loads(payload.decode("utf-8-sig"), parse_constant=no_constant, object_pairs_hook=unique_keys)
+
+
+def read_json(path: Path, default: Any = None) -> Any:
     # A brief sharing violation during a Windows atomic replace is not an empty
     # JSON document. Reopen briefly; invalid JSON itself is never swallowed.
     for attempt in range(4):
@@ -37,7 +50,7 @@ def read_json(path: Path, default: Any = None) -> Any:
             time.sleep(0.01 * (attempt + 1))
     if len(payload) > 16 * 1024 * 1024:
         raise ValueError(f"File too large: {path}")
-    return json.loads(payload.decode("utf-8-sig"), parse_constant=no_constant)
+    return decode_json(payload)
 
 
 def controls(noheel: float, heel: float, maximum: float) -> None:
@@ -89,7 +102,7 @@ class Editor:
         self.saved_time_ms = 0.0
         self.saved_process = self.connection.get("processToken") if recent(self.connection) else None
         self.before = optional_bytes(self.path)
-        self.user = read_json(self.path, {"schema": 1, "settings": {}, "items": [], "pairs": []})
+        self.user = decode_json(self.before) if self.before is not None else {"schema": 1, "settings": {}, "items": [], "pairs": []}
         if not isinstance(self.user, dict) or self.user.get("schema", 1) != 1:
             raise ValueError("Unsupported user configuration")
         self.runtime = read_json(self.output / "runtime-state.json", {})
@@ -174,6 +187,8 @@ class Editor:
         self.set_pair(p["stocking"]["armor"], p["footwear"]["armor"], float(p["NoHeel"]), float(p["Heel"]), note, approval=approval)
 
     def save(self) -> None:
+        from offline.engine import validate_user
+        validate_user(self.user, self.maximum)
         # An explicit --user-file must not silently edit a different file from
         # the running plugin. The actual backing path is supplied in its receipt.
         connection = read_json(self.output / "configuration-status.json", {})
@@ -263,11 +278,6 @@ def gui(plugins: Path, user_file: Path | None) -> None:
     ttk.Button(row,text="无鞋",command=lambda:shoe.set("<barefoot>")).pack(side="left")
     for text,kind in (("标记丝袜","stocking"),("标记鞋子","footwear"),("忽略该装备","ignore"),("恢复自动分类","auto")):
         ttk.Button(row,text=text,command=lambda k=kind:act(lambda e:e.mark(chosen()[0],k,addon=chosen()[1] if k=="stocking" else None))).pack(side="left")
-    row=ttk.Frame(frame);row.pack(fill="x")
-    ttk.Label(row,text="鞋面覆盖：").pack(side="left")
-    ttk.Button(row,text="不透明包脚",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"opaque-closed"))).pack(side="left")
-    ttk.Button(row,text="透明/露趾/未知",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"preserve"))).pack(side="left")
-    ttk.Button(row,text="清除覆盖标记",command=lambda:act(lambda e:e.set_coverage(chosen()[0],"auto"))).pack(side="left")
     for label,var in (("丝袜 ID",stock),("鞋 ID",shoe),("NoHeel [0,1]",n),("Heel [0,heelMax]",h),("备注",note)):
         r=ttk.Frame(frame);r.pack(fill="x");ttk.Label(r,text=label,width=23).pack(side="left");ttk.Entry(r,textvariable=var).pack(side="left",fill="x",expand=True)
     row=ttk.Frame(frame);row.pack(fill="x",pady=8)
@@ -298,13 +308,16 @@ def main() -> None:
     parser.add_argument("--plugins",type=Path,required=True,help="Directory containing generated output, usually MO2 overwrite/SKSE/Plugins")
     parser.add_argument("--user-file",type=Path,help="Optional explicit winning user overlay path")
     sub=parser.add_subparsers(dest="command",required=True)
-    for cmd in ("status","list","candidates","gui"):sub.add_parser(cmd)
+    for cmd in ("status","list","candidates","gui","inventory-gui"):sub.add_parser(cmd)
     mark=sub.add_parser("mark");mark.add_argument("armor");mark.add_argument("kind",choices=["stocking","footwear","ignore","auto"]);mark.add_argument("--addon");mark.add_argument("--note",default="")
     pair=sub.add_parser("set");pair.add_argument("stocking");pair.add_argument("footwear");pair.add_argument("--noheel",type=float,default=0);pair.add_argument("--heel",type=float,default=0);pair.add_argument("--mode",choices=["manual","ignore","auto"],default="manual");pair.add_argument("--note",default="")
     cov=sub.add_parser("coverage");cov.add_argument("armor");cov.add_argument("value",choices=["preserve","opaque-closed","auto"])
     approve=sub.add_parser("approve");approve.add_argument("index",type=int)
     args=parser.parse_args()
-    if args.command=="gui":gui(args.plugins,args.user_file);return
+    if args.command=="gui":
+        from overlay_ui import gui as overlay_gui
+        overlay_gui(args.plugins,args.user_file);return
+    if args.command=="inventory-gui":gui(args.plugins,args.user_file);return
     e=Editor(args.plugins,args.user_file)
     if args.command in ("status","list","candidates"):
         result={"status":lambda:{"runtime":e.runtime,"configuration":e.connection},"list":e.inventory,"candidates":e.candidates}[args.command]()

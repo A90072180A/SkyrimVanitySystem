@@ -21,6 +21,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_tool_preferences.py
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_runtime_consolidation.py
+      - if: runner.os == 'Windows'
+        run: python plugins/VanityUBEHeelAdapter/tests/test_overlay_editor.py
+        env:
+          VHA_REQUIRE_TK: '1'
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a python plugins/VanityUBEHeelAdapter/tests/test_overlay_editor.py
+        env:
+          VHA_REQUIRE_TK: '1'
       - run: python -m pip install numpy==2.2.6
       - run: python plugins/VanityUBEHeelAdapter/tests/test_cpb_surface_prep.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_offline.py

@@ -47,5 +47,6 @@
   "heelMax": 2,
   "writeRuntimeState": true,
   "enableComponentSubset": true,
-  "enableStockingFootOcclusion": true
+  "enableStockingFootOcclusion": false,
+  "enableGlassFootFit": true
 }
