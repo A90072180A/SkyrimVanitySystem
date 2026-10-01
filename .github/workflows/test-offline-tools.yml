@@ -21,6 +21,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python plugins/VanityUBEHeelAdapter/tests/test_feet_support.py
+      - if: runner.os == 'Windows'
+        run: python plugins/VanityUBEHeelAdapter/tests/test_feet_gui.py
+        env:
+          VHA_REQUIRE_TK: '1'
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a python plugins/VanityUBEHeelAdapter/tests/test_feet_gui.py
+        env:
+          VHA_REQUIRE_TK: '1'
       - run: python plugins/VanityUBEHeelAdapter/tests/test_tool_preferences.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_runtime_consolidation.py
       - if: runner.os == 'Windows'
@@ -59,3 +68,10 @@ jobs:
       - run: python plugins/VanityUBEHeelAdapter/tests/test_mesh_partition_prep.py
       - run: python plugins/VanityUBEHeelAdapter/tests/test_cpb_occlusion_prep.py
       - run: python -m compileall -q plugins/VanityUBEHeelAdapter/tools
+      - name: Package tested MO2 tools overlay
+        run: python plugins/VanityUBEHeelAdapter/tools/package_tools.py --output VHA-Tools-0.20.1.zip --commit "${{ github.sha }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VHA-Tools-0.20.1-${{ matrix.os }}
+          path: VHA-Tools-0.20.1.zip
+          if-no-files-found: error

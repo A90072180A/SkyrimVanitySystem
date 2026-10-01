@@ -17,9 +17,10 @@ from .loadorder import verify_sources
 from .catalog_query import pair_plan
 from .provenance import annotate
 from .shoe_groups import response_info
+from .foot_reference import TOOL_VERSION, select_reference, failure_status, failure_text
 from vha_fileio import absolute_path, readable_file, ensure_directory, unlink_missing_ok
 
-VERSION='0.18.0'
+VERSION='0.18.0'  # Accepted report-format generation; not the running tool version.
 DEFAULT_ANCHOR='[AFxII] Converse AS.esp|0000080A'
 STOCK_WORDS=('stocking','pantyhose','tights','bodystocking','hosiery','丝袜','连裤袜')
 
@@ -89,11 +90,11 @@ class Scanner:
         self.mods_root = absolute_path(mods_root) if mods_root else (instance/"mods" if instance else None)
         self.overwrite_root = instance/"overwrite" if instance else None
         self.morphs,self.preset_source=preset_values(preset,preset_name,weight)
-        self.load_order={'schema':1,'generatorVersion':VERSION,
+        self.load_order={'schema':1,'generatorVersion':VERSION,'toolVersion':TOOL_VERSION,
                          'data':str(self.data),'profile':str(self.profile),
                          'state':'reading-inputs'}
         order_report=self.output/'offline-loadorder.json'
-        self.record_diagnostics={'schema':1,'generatorVersion':VERSION,
+        self.record_diagnostics={'schema':1,'generatorVersion':VERSION,'toolVersion':TOOL_VERSION,
             'state':'not-started','issues':[],
             'semantics':'Unresolved field references are quarantined, never remapped. '
                         'Bad winning records and their dependents cannot generate height pairs.'}
@@ -179,7 +180,12 @@ class Scanner:
                 shape['capability']='TRI-error: '+str(e)
         return high,sources
 
-    def scan(self):
+    def scan(self, *, keys=None):
+        # Targeted rescans still resolve current active plugin winners first.
+        # Only the explicitly selected keys get their mesh resources opened.
+        key_scope = None if keys is None else set(keys)
+        if key_scope is not None and (not key_scope or any(not isinstance(k,str) for k in key_scope)):
+            raise ValueError('targeted scan requires nonempty exact catalog keys')
         armors=[r for r in self.records.values() if r['type']=='ARMO' and not r['deleted']]
         def relevant_armor(r):
             if r.get('blockedBy'):return True
@@ -200,6 +206,7 @@ class Scanner:
         relevant=[r for r in armors if relevant_armor(r)]
         for number,armor in enumerate(relevant):
             self.progress(f'模型 {number+1}/{len(relevant)}：{armor["name"]}')
+            if key_scope is not None and not any(k==armor['id'] or k.startswith(armor['id']+'::') for k in key_scope):continue
             if armor.get('blockedBy'):
                 self.rows.append({'key':armor['id'],'armor':armor['id'],'name':armor['name'],
                     'kind':'unknown','status':'quarantined-winning-record' if armor.get('quarantined') else 'depends-on-quarantined-record',
@@ -209,6 +216,7 @@ class Scanner:
             if not armor['addons']:
                 self.rows.append({'key':armor['id'],'armor':armor['id'],'name':armor['name'],'kind':'unknown','status':'missing-armature-or-template'});continue
             for addonid in dict.fromkeys(armor['addons']):
+                if key_scope is not None and armor['id']+'::'+addonid not in key_scope:continue
                 addon=self.records.get(addonid.casefold())
                 if not addon or addon['type']!='ARMA' or addon['deleted']:
                     self.rows.append({'key':armor['id']+'::'+addonid,'armor':armor['id'],'addon':addonid,'name':armor['name'],'kind':'unknown','status':'missing-winning-ARMA'});continue
@@ -237,11 +245,13 @@ class Scanner:
                                     'triangles':len(s.get('triangles',[])),'bodyTris':s['bodyTris'],
                                     'capability':s.get('capability'),'heightMorphs':{n:len(v) for n,v in s.get('morphs',{}).items() if n in ('NoHeel','Heel')}} for s in shapes]
                     if row['kind']=='footwear':
-                        selected=[s for s in shapes if s['status']=='complete' and s['name'].casefold()=='feet']
+                        selected,diagnostic=select_reference(shapes,self.morphs)
+                        row['footReference']=diagnostic
                     else:
                         selected=[s for s in shapes if s['status']=='complete' and any(geo.norm2(d)>0 for d in s['morphs'].get('NoHeel',{}).values())]
                     if len(selected)!=1:
-                        row['status']='no-usable-Feet' if row['kind']=='footwear' and not selected else 'NoHeel-unavailable' if not selected else 'multiple-eligible-shapes-needs-review'
+                        row['status']=failure_status(diagnostic) if row['kind']=='footwear' and not selected else 'NoHeel-unavailable' if not selected else 'multiple-eligible-shapes-needs-review'
+                        if row['kind']=='footwear':row['statusDetail']=failure_text(diagnostic)
                         continue
                     shape=selected[0];row['geometry']=shape['name'];row['status']='measurable'
                     if row['kind']!='footwear':row['kind']='stocking'
@@ -250,13 +260,17 @@ class Scanner:
         for item in self.rows:
             annotate(item, self.mods_root, self.overwrite_root)
         self.classify_foot_poses()
-        report={'schema':1,'generatorVersion':VERSION,'createdUnix':self.created,'data':str(self.data),'profile':str(self.profile),
+        report={'schema':1,'generatorVersion':VERSION,'toolVersion':TOOL_VERSION,'createdUnix':self.created,'data':str(self.data),'profile':str(self.profile),
                 'provenance':{'modsRoot':str(self.mods_root) if self.mods_root else None,
                     'semantics':'Model provider is derived only from the opened NIF/BSA handle path. Unknown stays unknown; plugin ownership is separate.'},
                 'plugins':self.plugins,'archives':[str(a.path) for a in self.resources.archives],
-                'context':self.context(),'coverage':'Active ARMO/ARMA inventory; UBE female SSE skinned single-partition geometry only. Missing/ambiguous assets explicitly skipped. INI-loaded archives require --archive-list.',
+                'context':self.context(),'coverage':'Active ARMO/ARMA inventory; UBE female SSE skinned global-domain triangle partitions; validated reference aliases. Missing/ambiguous assets explicitly skipped. INI-loaded archives require --archive-list.',
                 'counts':dict(Counter(r['status'] for r in self.rows)),'entries':self.rows,
                 'recordValidation':self.record_validation()}
+        if key_scope is not None:
+            report['targetedScan']={'requestedKeys':sorted(key_scope),
+                'missingKeys':sorted(key_scope-{r['key'] for r in self.rows}),
+                'semantics':'Fresh winning records and selected models only; not a replacement for a full catalog.'}
         self.record_diagnostics['catalogBlockedArmorCount']=sum(bool(r.get('blockedBy')) for r in self.rows)
         atomic_json(self.output/'offline-records.json',self.record_diagnostics)
         atomic_json(self.output/'offline-catalog.json',report)
@@ -311,6 +325,10 @@ class Scanner:
         shapes,sources=self.shapes(model,weighted)
         selected=[s for s in shapes if s['name']==name and s['status']=='complete']
         if len(selected)!=1:raise FormatError('source-shape-no-longer-unique')
+        if row.get('footReference',{}).get('method')=='validated-alias':
+            checked,diagnostic=select_reference(shapes,self.morphs)
+            if len(checked)!=1 or checked[0]['name']!=name:
+                raise FormatError('reference-changed: '+diagnostic['reason'])
         return selected[0],sources
 
     def recommend(self,anchor_id=DEFAULT_ANCHOR,stocking_keys=None,heel_max=2.,max_residual=.15,max_pairs=20000,*,shoe_keys=None):
@@ -353,7 +371,7 @@ class Scanner:
                     row['sources']=list({(x['kind'],x['path'],x.get('resource','')):x for x in [*anchor_sources,*stock_sources,*target_sources]}.values())
                 except (OSError,ValueError,struct_error) as e:row['status']=str(e)
                 candidates.append(row)
-        report={'schema':1,'generatorVersion':VERSION,'createdUnix':time.time(),'context':self.context(),
+        report={'schema':1,'generatorVersion':VERSION,'toolVersion':TOOL_VERSION,'createdUnix':time.time(),'context':self.context(),
                 'heelMax':heel_max,'NoHeelMaximum':1.,'maxResidual':max_residual,
                 'selection':{'stockingKeys':[r['key'] for r in socks],'shoeKeys':[r['key'] for r in shoes],
                              'pairCount':plan['count'],'pairBudget':max_pairs,'semantics':'Only these exact keys; empty selection never expands to all.'},

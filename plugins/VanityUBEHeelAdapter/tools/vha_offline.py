@@ -21,6 +21,8 @@ from offline.candidate_store import write_candidates, read_candidates
 from offline.bulk_library import export_library, eligible
 from offline.shoe_groups import propose
 from vha_fileio import absolute_path
+from offline.foot_reference import TOOL_VERSION
+from offline.feet_actions import rescan_keys, witchy_cpb_trial
 
 
 def gui(args, *, run_loop=True):
@@ -30,7 +32,7 @@ def gui(args, *, run_loop=True):
     from tool_preferences import Preferences, PATH_KEYS, SCOPED_KEYS
     preferences=Preferences(getattr(args,"settings_file",None))
     remembered=preferences.initial(args)
-    root=tk.Tk();root.title('VHA 0.20.0 / 高度扫描、库浏览、手工覆盖');root.geometry('1380x920');root.minsize(1120,820)
+    root=tk.Tk();root.title(f'VHA 工具 {TOOL_VERSION} / 高度扫描、库浏览、手工覆盖（DLL 0.20.0）');root.geometry('1380x920');root.minsize(1120,820)
     pathvars={key:tk.StringVar(master=root,value=remembered[key]) for key in PATH_KEYS}
     data,profile,mods_root=(pathvars[key] for key in ('data','profile','mods_root'))
     for key in SCOPED_KEYS:setattr(args,key,Path(remembered[key]) if remembered[key] else None)
@@ -191,6 +193,28 @@ def gui(args, *, run_loop=True):
                     f'{issues} 条引用诊断，{blocked} 条异常最终记录已隔离。详情：offline-records.json。'
                     '请在前两个标签页分别筛选、选择丝袜和鞋；隔离项不会产生配对。')
         job(run,done)
+    def rescan_problem_feet():
+        try:
+            keys=rescan_keys(catalog.model.rows,sock_panel.selected_keys(),anchor.get())
+            d,p,w=Path(data.get()),Path(profile.get()),float(weight.get())
+            # Never replace the user's full catalog or existing candidate report.
+            import uuid
+            output=(args.output or d/'SKSE/Plugins/VanityUBEHeelAdapter/offline')/('feet-review-'+uuid.uuid4().hex[:10])
+            selected_mods=Path(mods_root.get()) if mods_root.get().strip() else None
+        except ValueError as exc:
+            messagebox.showinfo('复查范围',str(exc),parent=root);return
+        def run():
+            scanner=Scanner(d,p,output,w,args.preset,args.preset_name,args.archive_list,args.race,progress,mods_root=selected_mods)
+            return scanner,scanner.scan(keys=keys)
+        def done(result):
+            scanner,report=result
+            state['scanner']=scanner;clear_candidates();populate(scanner.rows)
+            missing=len(report['targetedScan']['missingKeys'])
+            usable=sum(r.get('kind')=='footwear' and r.get('status')=='measurable' for r in scanner.rows)
+            msg.set(f'定向复查完成：{usable} 条可测鞋（含参考鞋），{missing} 条旧身份已不在当前记录中。'
+                    f'原全量清单、旧高度库和旧配对报告未改。结果：{output}。重新选择双方后，仅计算新增配对。')
+        job(run,done)
+
     def recommend():
         s=state['scanner']
         if not s:messagebox.showinfo('先扫描','请先运行扫描。');return
@@ -388,23 +412,28 @@ def gui(args, *, run_loop=True):
         options=argparse.Namespace(library=None, plugins=args.plugins or (d/'SKSE/Plugins' if d else None),
             user_file=args.user_file, data=d, shoe='')
         return library_gui(options,parent=root,rows=current_rows,selected=chosen,run_loop=False)
-    def edit_manual_overlay():
+    def edit_manual_overlay(*, trial=False):
         try:
             from overlay_ui import gui as overlay_gui
             d=Path(data.get().strip()) if data.get().strip() else None
             plugins=args.plugins or (d/'SKSE/Plugins' if d else None)
             if plugins is None:raise ValueError('先选择 Data 或展开写入路径设置 SKSE/Plugins；无需扫描。')
             remember_paths()
-            seed={}
+            seed={};pointed={}
             for key,panel in (('stocking',sock_panel),('footwear',shoe_panel)):
+                if panel.pending:panel.refresh()
                 row=panel.active_row()
-                if row and len(panel.selected_keys())==1:seed[key]=row['armor']
+                # Nonmeasurable shoes are valid MANUAL identities, not compute scope.
+                if row and tuple(panel.tree.selection())==(row['key'],):
+                    seed[key]=row['armor'];pointed[key]=row
+            if trial:
+                seed=witchy_cpb_trial(pointed.get('stocking'),pointed.get('footwear'))
             return overlay_gui(plugins,args.user_file,parent=root,run_loop=False,seed=seed or None)
         except (OSError,ValueError,RuntimeError) as exc:
             messagebox.showerror('手工覆盖未打开',str(exc),parent=root)
 
     edit_actions=ttk.Frame(root,padding=(10,0));edit_actions.pack(fill='x')
-    for pos,(label,fn) in enumerate((('直接编辑手工覆盖 JSON',edit_manual_overlay),('浏览已保存高度库',browse_saved_library),('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
+    for pos,(label,fn) in enumerate((('直接编辑手工覆盖 JSON',edit_manual_overlay),('仅复查问题鞋＋所选丝袜',rescan_problem_feet),('Witchy＋CPB 试调（未验证）',lambda:edit_manual_overlay(trial=True)),('浏览已保存高度库',browse_saved_library),('重新保存结果',retry_save),('按鞋共享值分析',group_preview),('手工调整一条建议',adjust),('手动标记所指装备',mark),('载入已计算结果',load_candidates),('载入旧清单（仅筛选预览）',browse_catalog),('保存筛选',save_filters),('读取筛选',load_filters))):
         b=ttk.Button(edit_actions,text=label,command=fn);b.grid(row=pos//4,column=pos%4,padx=3,pady=2,sticky='ew');buttons.append(b)
     for column in range(4):edit_actions.columnconfigure(column,weight=1)
     for label,fn in (('1. 扫描启用装备',scan),('2. 计算高度配对',recommend),('选择可应用建议（含警告）',select_applicable),('3. 保存所选到高度库',export_selected)):
@@ -451,7 +480,7 @@ def gui(args, *, run_loop=True):
     update_scope()
     root.protocol('WM_DELETE_WINDOW',close);root.after(100,poll)
     # Test seam uses the same widgets/actions as the shipped entry point.
-    root.vha={'paths':pathvars,'remember_paths':remember_paths,'preferences':preferences,'edit_manual_overlay':edit_manual_overlay,'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
+    root.vha={'rescan_problem_feet':rescan_problem_feet,'paths':pathvars,'remember_paths':remember_paths,'preferences':preferences,'edit_manual_overlay':edit_manual_overlay,'panels':panels,'scan':scan,'recommend':recommend,'apply':apply,
               'browse_saved_library':browse_saved_library,'browse':browse_catalog,'save_filters':save_filters,'load_filters':load_filters,
               'state':state,'retry_save':retry_save,'group_preview':group_preview,'candidates':candidates,'scope':scope_text,'message':msg,
               'compute_button':compute_button,'populate':populate,'close':close,
@@ -472,7 +501,7 @@ def main():
     p.add_argument('--archive-list',type=Path,help='Additional INI BSA filenames, low to high priority, one per line')
     sub=p.add_subparsers(dest='command')
     sub.add_parser('gui')
-    scan=sub.add_parser('scan');scan.add_argument('--recommend',action='store_true');scan.add_argument('--stocking',action='append');scan.add_argument('--shoe',action='append');scan.add_argument('--all-measurable',action='store_true',help='Explicitly use all measurable items for any unspecified side')
+    scan=sub.add_parser('scan');scan.add_argument('--only-key',action='append',help='Read mesh resources only for these exact armor::addon keys');scan.add_argument('--recommend',action='store_true');scan.add_argument('--stocking',action='append');scan.add_argument('--shoe',action='append');scan.add_argument('--all-measurable',action='store_true',help='Explicitly use all measurable items for any unspecified side')
     apply=sub.add_parser('apply');apply.add_argument('--report',type=Path,required=True);apply.add_argument('--indexes',required=True);apply.add_argument('--allow-reviewed-residual',action='store_true')
     export=sub.add_parser('export-library');export.add_argument('--report',type=Path,required=True);export.add_argument('--indexes',required=True)
     export.add_argument('--strict-residual',action='store_true')
@@ -490,8 +519,11 @@ def main():
     else:
         if not args.data or not args.profile:p.error('scan requires --data and --profile')
         output=args.output or args.data/'SKSE/Plugins/VanityUBEHeelAdapter/offline'
+        if args.only_key:
+            import uuid
+            output=output/('feet-review-'+uuid.uuid4().hex[:10])
         s=Scanner(args.data,args.profile,output,args.weight,args.preset,args.preset_name,args.archive_list,args.race,lambda t:print(t,flush=True),mods_root=args.mods_root)
-        result=s.scan()
+        result=s.scan(keys=args.only_key)
         if args.recommend:
             if not args.all_measurable and (not args.stocking or not args.shoe):
                 raise ValueError('Specify both --stocking and --shoe, or explicitly use --all-measurable.')

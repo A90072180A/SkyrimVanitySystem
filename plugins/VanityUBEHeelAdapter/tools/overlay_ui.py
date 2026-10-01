@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import height_editor
 from offline.engine import validate_user
+from offline.foot_reference import TOOL_VERSION
 
 
 def decode(text: str) -> dict:
@@ -88,7 +89,7 @@ def gui(plugins: Path, user_file: Path | None = None, *, parent=None, run_loop=T
     from tkinter import ttk, messagebox, filedialog
     session = OverlaySession(plugins, user_file)
     window = tk.Toplevel(parent) if parent else tk.Tk()
-    window.title('VHA 0.20.0 — 手工覆盖 JSON（无需扫描）')
+    window.title(f'VHA 工具 {TOOL_VERSION} — 手工覆盖 JSON（无需扫描）')
     window.geometry('1160x760'); window.minsize(900, 620)
     if parent:
         window.transient(parent)
@@ -170,9 +171,9 @@ def gui(plugins: Path, user_file: Path | None = None, *, parent=None, run_loop=T
         for key in columns:
             fields[key].set('manual' if key == 'mode' else '0' if key in ('NoHeel', 'Heel') else '')
         if seed:
-            for key in ('stocking', 'footwear'):
-                fields[key].set(seed.get(key, ''))
-        status.set('正在新建配对；“应用此条到编辑区”后，再保存文件。')
+            for key in columns:
+                if key in seed:fields[key].set(str(seed[key]))
+        status.set('未验证手工试调起点，不是 Witchy 自动测量值；尚未写文件，也不会覆盖已有配对。' if seed and 'UNVALIDATED' in seed.get('note','') else '正在新建配对；“应用此条到编辑区”后，再保存文件。')
 
     def put():
         def run():

@@ -134,7 +134,8 @@ class CatalogPanel(ttk.Frame):
     def update_counts(self):
         rows=self.model.visible
         possible=sum(eligible(r,self.role) for r in rows)
-        self.count.set(f'筛选结果 {len(rows):,} / 本页类别总数 {len(self.model.rows):,}；其中可测 {possible:,}；已选可测 {len(self.model.selected):,}。')
+        models=len({r.get('model','').replace('/',chr(92)).casefold() for r in rows if r.get('model')})
+        self.count.set(f'筛选结果 {len(rows):,} 条记录 / {models:,} 个模型路径；类别总数 {len(self.model.rows):,}；可测 {possible:,}；已选可测 {len(self.model.selected):,}。')
         pages=max(1,(len(rows)+self.PAGE_SIZE-1)//self.PAGE_SIZE)
         self.page_text.set(f'{self.page+1} / {pages} 页，每页最多 {self.PAGE_SIZE} 行')
 

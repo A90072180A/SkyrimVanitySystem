@@ -183,29 +183,51 @@ def transform(r: Reader, translation_first=True):
     return {'rotation':rot,'translation':t,'scale':r.f32()}
 
 def parse_partition(data):
+    """Read SSE global vertex data without collapsing or remapping its domain.
+
+    In stream 100 triangle indices are global (nifly bMappedIndices=false).
+    VertexMap describes the partition's skinning subset, NOT a second mapping
+    to apply to those triangles. Both triangle copies must agree. Unsupported
+    strips/layouts and ambiguous/corrupt data remain explicit failures.
+    """
     r=Reader(data)
-    if r.u32()!=1:raise FormatError('unsupported-multiple-partitions')
+    parts=r.u32()
+    if not 1<=parts<=4096:raise FormatError('partition-count-limit')
     size,stride,desc=r.u32(),r.u32(),r.u64()
     if not 16<=stride<=256 or size%stride or (desc&15)*4!=stride:raise FormatError('invalid-stride')
     nv=size//stride
     if not 0<nv<=65535 or not desc>>44&1:raise FormatError('unsupported-position-stream')
     offsets=[((desc>>(4*i+2))&0x3c) for i in range(1,10) if (desc>>44)&(1<<i)]
     if min(offsets,default=stride)!=16 or any(x<16 or x>=stride for x in offsets):raise FormatError('unsupported-vertex-layout')
-    raw=r.take(size)
-    count,nt,nb,ns,nw=r.unpack('5H')
-    if count!=nv or not nt or nb>256 or ns!=0 or nw!=4:raise FormatError('unsupported-partition-domain')
-    r.take(nb*2)
-    if r.boolean() and r.unpack('H'*nv)!=tuple(range(nv)):raise FormatError('nonidentity-vertex-map')
-    if r.boolean():r.take(nv*nw*4)
-    if not r.boolean():raise FormatError('missing-faces')
-    tris=[tuple(t) for t in struct.iter_unpack('<3H',r.take(nt*6))]
-    if any(max(t)>=nv for t in tris):raise FormatError('triangle-out-of-bounds')
-    if not any(len(set(t))==3 for t in tris):raise FormatError('all-indices-degenerate')
-    if r.boolean():r.take(nv*nw)
-    r.take(2)
-    if r.u64()!=desc:raise FormatError('partition-descriptor-mismatch')
-    if tris!=list(struct.iter_unpack('<3H',r.take(nt*6))):raise FormatError('triangle-domain-mismatch')
+    raw=r.take(size);tris=[];previous_faces=set()
+    for part in range(parts):
+        count,nt,nb,ns,nw=r.unpack('5H')
+        if not 0<count<=nv or not nt or nb>256 or ns!=0 or nw!=4:raise FormatError('unsupported-partition-domain')
+        if len(tris)+nt>1000000:raise FormatError('partition-triangle-limit')
+        r.take(nb*2)
+        if r.boolean():
+            mapping=r.unpack('H'*count)
+            domain=set(mapping)
+            if len(domain)!=count or max(domain)>=nv:raise FormatError('invalid-partition-vertex-map')
+        else:
+            if count!=nv:raise FormatError('missing-subset-vertex-map')
+            domain=range(nv)
+        if r.boolean():r.take(count*nw*4)
+        if not r.boolean():raise FormatError('missing-faces')
+        faces=list(struct.iter_unpack('<3H',r.take(nt*6)))
+        if any(max(t)>=nv for t in faces):raise FormatError('triangle-out-of-bounds')
+        if any(i not in domain for t in faces for i in t):raise FormatError('triangle-outside-partition-map')
+        if r.boolean():r.take(count*nw)
+        lod=r.u8();r.boolean()  # globalVB flag is not an SSE index-remap switch.
+        if lod!=0:raise FormatError('unsupported-partition-lod')
+        if r.u64()!=desc:raise FormatError('partition-descriptor-mismatch')
+        if faces!=list(struct.iter_unpack('<3H',r.take(nt*6))):raise FormatError('triangle-domain-mismatch')
+        # Do not silently double or delete surface across separate partitions.
+        keys={tuple(sorted(t)) for t in faces}
+        if part and previous_faces.intersection(keys):raise FormatError('overlapping-partition-faces')
+        previous_faces.update(keys);tris.extend(faces)
     r.done()
+    if not any(len(set(t))==3 for t in tris):raise FormatError('all-indices-degenerate')
     points=[struct.unpack_from('<3f',raw,i*stride) for i in range(nv)]
     if not all(math.isfinite(x) for p in points for x in p):raise FormatError('nonfinite-NIF-position')
     return points,tris
